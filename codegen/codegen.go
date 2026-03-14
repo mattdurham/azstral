@@ -43,10 +43,15 @@ func RenderFile(g *graph.Graph, st *store.Store, fileID string) (string, error) 
 	b.WriteString("\n")
 
 	// Collect children — imports separate, rest in source line order.
+	// NOTE: filter to nodes whose File field matches this file to guard against
+	// spurious cross-file edges created when multiple packages share a symbol name.
 	children := g.Children(fileID)
 	var imports []*graph.Node
 	var decls []*graph.Node
 	for _, child := range children {
+		if child.File != "" && child.File != fileID {
+			continue
+		}
 		switch child.Kind {
 		case graph.KindImport:
 			imports = append(imports, child)

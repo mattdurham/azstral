@@ -137,7 +137,7 @@ func ParseFile(g *graph.Graph, filePath string) error {
 			commentMeta["trailing"] = "true"
 		}
 
-		commentID := fmt.Sprintf("comment:%s:%d", filepath.Base(filePath), pos.Line)
+		commentID := fmt.Sprintf("comment:%s:%d", filePath, pos.Line)
 		_ = g.AddNode(&graph.Node{
 			ID:       commentID,
 			Kind:     graph.KindComment,
@@ -251,6 +251,12 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 		Text:     bodyText,
 		Metadata: meta,
 	}); err != nil {
+		// Guard against cross-package name collisions (e.g. two packages both define func:New).
+		// Nodes pre-created by addCallNode have File=="", so only skip if the existing node
+		// has a File set to a different file (confirming it belongs to another package).
+		if existing, ok := g.GetNode(funcID); ok && existing.File != "" && existing.File != fileID {
+			return // name claimed by another file — skip to avoid cross-file contamination
+		}
 		// Node pre-created by addCallNode (local call seen before declaration) — update it.
 		_ = g.UpdateNode(funcID, graph.NodePatch{
 			Name:     &nameStr,
@@ -397,7 +403,7 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 			keyword = "var"
 		}
 		blockText := extractText(fset, src, decl.Pos(), decl.End())
-		blockID := fmt.Sprintf("%s_block:%d", keyword, pos.Line)
+		blockID := fmt.Sprintf("%s_block:%s:%d", keyword, fileID, pos.Line)
 		_ = g.AddNode(&graph.Node{
 			ID:      blockID,
 			Kind:    graph.KindVariable,
@@ -450,7 +456,7 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 			if s.TypeParams != nil {
 				typeMeta["type_params"] = extractText(fset, src, s.TypeParams.Pos(), s.TypeParams.End())
 			}
-			_ = g.AddNode(&graph.Node{
+			if err := g.AddNode(&graph.Node{
 				ID:       typeID,
 				Kind:     graph.KindType,
 				Name:     s.Name.Name,
@@ -459,7 +465,11 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 				EndLine:  endPos.Line,
 				Text:     typeText,
 				Metadata: typeMeta,
-			})
+			}); err != nil {
+				if existing, ok := g.GetNode(typeID); ok && existing.File != fileID {
+					continue // cross-package name collision — skip
+				}
+			}
 			_ = g.AddEdge(fileID, typeID, graph.EdgeContains)
 
 		case *ast.ValueSpec:
@@ -479,7 +489,7 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 				if i < len(s.Values) {
 					valueText = extractText(fset, src, s.Values[i].Pos(), s.Values[i].End())
 				}
-				_ = g.AddNode(&graph.Node{
+				if err := g.AddNode(&graph.Node{
 					ID:       varID,
 					Kind:     graph.KindVariable,
 					Name:     name.Name,
@@ -487,7 +497,11 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 					Line:     pos.Line,
 					Text:     valueText,
 					Metadata: meta,
-				})
+				}); err != nil {
+					if existing, ok := g.GetNode(varID); ok && existing.File != fileID {
+						continue // cross-package name collision — skip
+					}
+				}
 				_ = g.AddEdge(fileID, varID, graph.EdgeContains)
 			}
 		}
@@ -595,7 +609,7 @@ func buildDocTargetMap(fset *token.FileSet, f *ast.File, fileID string) map[toke
 					if d.Tok == token.VAR {
 						keyword = "var"
 					}
-					blockID := fmt.Sprintf("%s_block:%d", keyword, pos.Line)
+					blockID := fmt.Sprintf("%s_block:%s:%d", keyword, fileID, pos.Line)
 					m[d.Doc.Pos()] = blockID
 				} else {
 					for _, spec := range d.Specs {

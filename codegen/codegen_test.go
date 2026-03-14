@@ -564,6 +564,84 @@ func main() {
 	testRoundTrip(t, src)
 }
 
+// TestRenderFile_CrossFileFilter verifies that RenderFile does not emit symbols
+// from other files even if a spurious contains edge exists in the graph.
+func TestRenderFile_CrossFileFilter(t *testing.T) {
+	dir := t.TempDir()
+
+	// File A defines type Foo.
+	pathA := filepath.Join(dir, "a.go")
+	os.WriteFile(pathA, []byte("package p\n\ntype Foo struct{}\n"), 0o644)
+
+	// File B defines func Bar.
+	pathB := filepath.Join(dir, "b.go")
+	os.WriteFile(pathB, []byte("package p\n\nfunc Bar() {}\n"), 0o644)
+
+	g := graph.New()
+	parser.ParseFile(g, pathA)
+	parser.ParseFile(g, pathB)
+
+	// Manually inject a spurious edge: file B "contains" type Foo from file A.
+	fileB := "file:" + pathB
+	typeA := "type:Foo"
+	_ = g.AddEdge(fileB, typeA, graph.EdgeContains)
+
+	// Render file B — Foo must NOT appear in the output.
+	got, err := codegen.RenderFile(g, nil, fileB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "type Foo") {
+		t.Errorf("RenderFile leaked cross-file type Foo into file B output:\n%s", got)
+	}
+	if !strings.Contains(got, "func Bar") {
+		t.Errorf("RenderFile missing Bar in file B output:\n%s", got)
+	}
+	t.Logf("output:\n%s", got)
+}
+
+// TestParseTree_RoundTrip verifies that parsing two packages with shared
+// symbol names and rendering each file produces clean, non-contaminated output.
+func TestParseTree_RoundTrip(t *testing.T) {
+	root := t.TempDir()
+
+	aDir := filepath.Join(root, "a")
+	bDir := filepath.Join(root, "b")
+	os.MkdirAll(aDir, 0o755)
+	os.MkdirAll(bDir, 0o755)
+
+	srcA := "package a\n\ntype Config struct{ X int }\n\nfunc New() *Config { return &Config{} }\n"
+	srcB := "package b\n\ntype Config struct{ Y string }\n\nfunc New() *Config { return &Config{} }\n"
+	os.WriteFile(filepath.Join(aDir, "a.go"), []byte(srcA), 0o644)
+	os.WriteFile(filepath.Join(bDir, "b.go"), []byte(srcB), 0o644)
+
+	g := graph.New()
+	parser.ParseTree(g, root)
+
+	// Render file A — must only contain package a's symbols.
+	fileA := "file:" + filepath.Join(aDir, "a.go")
+	gotA, err := codegen.RenderFile(g, nil, fileA)
+	if err != nil {
+		t.Fatalf("RenderFile a: %v", err)
+	}
+	if strings.Contains(gotA, "Y string") {
+		t.Errorf("file A output contains package b's field Y:\n%s", gotA)
+	}
+
+	// Render file B — must only contain package b's symbols.
+	fileB := "file:" + filepath.Join(bDir, "b.go")
+	gotB, err := codegen.RenderFile(g, nil, fileB)
+	if err != nil {
+		t.Fatalf("RenderFile b: %v", err)
+	}
+	if strings.Contains(gotB, "X int") {
+		t.Errorf("file B output contains package a's field X:\n%s", gotB)
+	}
+
+	t.Logf("A output:\n%s", gotA)
+	t.Logf("B output:\n%s", gotB)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
