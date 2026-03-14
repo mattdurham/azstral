@@ -4,18 +4,20 @@
 package parser
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/matt/azstral/graph"
 	"github.com/matt/azstral/specs"
-)
 
+	"fmt"
+
+	"os"
+	"path/filepath"
+
+	"strings"
+)
 // ParseFile parses a single Go file and adds its nodes/edges to the graph.
 func ParseFile(g *graph.Graph, filePath string) error {
 	src, err := os.ReadFile(filePath)
@@ -271,6 +273,30 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 			return true
 		})
 	}
+}
+func ParseTree(g *graph.Graph, root string) (int, error) {
+	var count int
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "vendor", ".git", "node_modules", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		if perr := ParseFile(g, path); perr != nil {
+			return nil
+		}
+		count++
+		return nil
+	})
+	return count, err
 }
 
 // addCallNode creates a KindCall node plus shared symbol nodes for the callee.

@@ -3,21 +3,23 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/matt/azstral/ccgf"
 	"github.com/matt/azstral/codegen"
 	"github.com/matt/azstral/graph"
 	"github.com/matt/azstral/parser"
 	"github.com/matt/azstral/store"
+	"context"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-)
 
+	"fmt"
+
+	"os"
+	"path/filepath"
+
+	"strings"
+)
 // New creates an MCP server with all azstral tools registered.
 // The SQLite database is created at dbPath (use ":memory:" for in-memory).
 func New(dbPath string) (*mcp.Server, error) {
@@ -48,7 +50,6 @@ func New(dbPath string) (*mcp.Server, error) {
 }
 
 // --- Input types ---
-
 type pathInput struct {
 	Path string `json:"path" jsonschema:"absolute file or directory path"`
 }
@@ -67,7 +68,6 @@ type listEdgesInput struct {
 }
 
 // --- Parse tools ---
-
 func registerParseTools(srv *mcp.Server, g *graph.Graph) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "parse_file",
@@ -94,10 +94,23 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph) {
 		}
 		return toolText(fmt.Sprintf("parsed dir %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
 	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "parse_tree",
+		Description: "Recursively parse all Go files under a directory tree. Skips vendor, .git, node_modules, and testdata directories.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
+		if input.Path == "" {
+			return toolError("path is required"), nil, nil
+		}
+		n, err := parser.ParseTree(g, input.Path)
+		if err != nil {
+			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
+		}
+		return toolText(fmt.Sprintf("parsed tree %s — %d files, %d nodes", input.Path, n, len(g.Nodes))), nil, nil
+	})
 }
 
 // --- Query tools ---
-
 func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_graph",
@@ -142,7 +155,6 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 }
 
 // --- Mutation tools ---
-
 func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 	type addNodeInput struct {
 		ID       string            `json:"id" jsonschema:"unique node ID, e.g. pkg:main, file:main.go, func:main"`
@@ -220,7 +232,6 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 }
 
 // --- Spec store tools ---
-
 func registerSpecTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 	type createSpecInput struct {
 		ID        string `json:"id" jsonschema:"globally unique spec ID, e.g. SPEC-001, NOTE-003, TEST-006, BENCH-001"`
@@ -320,7 +331,6 @@ func registerSpecTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 }
 
 // --- Codegen tools ---
-
 func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "render",
@@ -357,7 +367,6 @@ func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 }
 
 // --- Helpers ---
-
 func toolText(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
@@ -388,7 +397,6 @@ func toolJSON(v any) *mcp.CallToolResult {
 }
 
 // --- CCGF tools ---
-
 func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 	type ccgfInput struct {
 		Scope  string `json:"scope,omitempty" jsonschema:"scope: 'program' (default), 'file:<id>' for single file, 'type:<id>' for single type and its methods"`
