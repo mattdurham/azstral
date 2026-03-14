@@ -128,6 +128,9 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
 			}
 			path = root
 		}
+		// Reset before parsing so the graph contains exactly this tree —
+		// not an accumulation of previously parsed projects.
+		g.Reset()
 		n, err := parser.ParseTree(g, path)
 		if err != nil {
 			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
