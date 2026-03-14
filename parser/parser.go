@@ -167,6 +167,10 @@ func ParseFile(g *graph.Graph, filePath string) error {
 				_ = g.AddEdge(specID, target, graph.EdgeCovers)
 			}
 		}
+
+		// Extract Go compiler directives (//go:embed, //go:build, etc.)
+		// and attach as metadata on the target node.
+		extractDirectives(g, cg, target)
 	}
 
 	return nil
@@ -229,6 +233,9 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 	if typeParams != "" {
 		meta["type_params"] = typeParams
 	}
+	// Compute complexity metrics.
+	meta["cyclomatic"] = fmt.Sprintf("%d", CyclomaticComplexity(decl.Body))
+	meta["cognitive"] = fmt.Sprintf("%d", CognitiveComplexity(decl.Body))
 
 	nameStr := decl.Name.Name
 	line, endLine := pos.Line, endPos.Line
@@ -602,6 +609,42 @@ func findNearestCodeNode(g *graph.Graph, fileID string, commentEndLine int) stri
 		}
 	}
 	return bestID
+}
+
+// extractDirectives scans a comment group for //go: directives and attaches
+// them as metadata on the target node. Each directive becomes a metadata key
+// (e.g. "go:embed", "go:build", "go:noinline") with the arguments as the value.
+// Multiple directives of the same kind are space-joined.
+func extractDirectives(g *graph.Graph, cg *ast.CommentGroup, targetID string) {
+	if targetID == "" {
+		return
+	}
+	for _, c := range cg.List {
+		text := c.Text
+		if !strings.HasPrefix(text, "//go:") {
+			continue
+		}
+		// Strip the "//" prefix → "go:embed folder/*.hash"
+		directive := strings.TrimPrefix(text, "//")
+		// Split into name and args.
+		name, args, _ := strings.Cut(directive, " ")
+		args = strings.TrimSpace(args)
+
+		targetNode, ok := g.GetNode(targetID)
+		if !ok {
+			continue
+		}
+		if targetNode.Metadata == nil {
+			targetNode.Metadata = make(map[string]string)
+		}
+		if existing := targetNode.Metadata[name]; existing != "" {
+			targetNode.Metadata[name] = existing + " " + args
+		} else if args != "" {
+			targetNode.Metadata[name] = args
+		} else {
+			targetNode.Metadata[name] = "true"
+		}
+	}
 }
 
 func truncate(s string, maxLen int) string {

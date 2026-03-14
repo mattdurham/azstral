@@ -571,7 +571,7 @@ func (e *encoder) emit() string {
 		}
 	}
 
-	// Semantic attributes: doc comments and spec IDs (always emitted).
+	// Semantic attributes: doc comments, spec IDs, and directives (always emitted).
 	var semAttrs []string
 	for _, s := range e.syms {
 		if doc := e.docComment(s.nodeID); doc != "" {
@@ -579,6 +579,11 @@ func (e *encoder) emit() string {
 		}
 		if specs := e.specIDs(s.nodeID); specs != "" {
 			semAttrs = append(semAttrs, fmt.Sprintf("a %s specs %s", s.id, specs))
+		}
+		// Emit go: directives from node metadata.
+		for _, key := range e.directiveKeys(s.nodeID) {
+			n := s.node
+			semAttrs = append(semAttrs, fmt.Sprintf("a %s %s %s", s.id, key, n.Metadata[key]))
 		}
 	}
 	if len(semAttrs) > 0 {
@@ -613,6 +618,13 @@ func (e *encoder) emit() string {
 			}
 			if s.vendor {
 				attrs = append(attrs, fmt.Sprintf("a %s ro 1", s.id))
+			}
+			// Complexity metrics for functions.
+			if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
+				attrs = append(attrs, fmt.Sprintf("a %s cyclo %s", s.id, cyc))
+			}
+			if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
+				attrs = append(attrs, fmt.Sprintf("a %s cogn %s", s.id, cog))
 			}
 		}
 		if len(attrs) > 0 {
@@ -687,6 +699,22 @@ func (e *encoder) specIDs(nodeID string) string {
 	}
 	sort.Strings(ids)
 	return strings.Join(ids, ",")
+}
+
+// directiveKeys returns sorted go: directive keys from a node's metadata.
+func (e *encoder) directiveKeys(nodeID string) []string {
+	n, ok := e.g.GetNode(nodeID)
+	if !ok || n.Metadata == nil {
+		return nil
+	}
+	var keys []string
+	for k := range n.Metadata {
+		if strings.HasPrefix(k, "go:") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // buildSig constructs a compact function signature string.

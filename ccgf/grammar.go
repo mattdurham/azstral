@@ -41,10 +41,13 @@ Blank lines separate sections (symbols, edges, attributes).
 
   doc    Doc comment text (\n = newline)
   specs  Comma-separated spec IDs (SPEC-001,TEST-006)
+  go:*   Go compiler directives (go:embed, go:build, go:noinline, etc.)
   loc    File location (file.go:line)
   sig    Function signature (func(params)returns)
   kind   Type kind (struct, interface)
   ro     Read-only (1 = vendored)
+  cyclo  Cyclomatic complexity (decision points + 1). Omitted if ≤ 1.
+  cogn   Cognitive complexity (nesting-weighted). Omitted if 0.
 
 ## Vendor flag
 

@@ -465,3 +465,80 @@ func helper() string {
 		t.Errorf("helper node returns = %q; want it to contain 'string'", returns)
 	}
 }
+
+func TestParseFile_GoDirectives(t *testing.T) {
+	src := `package main
+
+import "embed"
+
+//go:embed data.txt
+var content string
+
+//go:embed assets/*
+var assets embed.FS
+
+//go:noinline
+func heavy() {}
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	os.WriteFile(path, []byte(src), 0o644)
+
+	g := graph.New()
+	if err := ParseFile(g, path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check go:embed on content variable.
+	contentNode, ok := g.GetNode("var:content")
+	if !ok {
+		t.Fatal("missing var:content node")
+	}
+	if got := contentNode.Metadata["go:embed"]; got != "data.txt" {
+		t.Errorf("var:content go:embed = %q, want %q", got, "data.txt")
+	}
+
+	// Check go:embed on assets variable.
+	assetsNode, ok := g.GetNode("var:assets")
+	if !ok {
+		t.Fatal("missing var:assets node")
+	}
+	if got := assetsNode.Metadata["go:embed"]; got != "assets/*" {
+		t.Errorf("var:assets go:embed = %q, want %q", got, "assets/*")
+	}
+
+	// Check go:noinline on heavy function.
+	heavyNode, ok := g.GetNode("func:heavy")
+	if !ok {
+		t.Fatal("missing func:heavy node")
+	}
+	if got := heavyNode.Metadata["go:noinline"]; got != "true" {
+		t.Errorf("func:heavy go:noinline = %q, want %q", got, "true")
+	}
+}
+
+func TestParseFile_GoBuildDirective(t *testing.T) {
+	src := `//go:build linux && amd64
+
+package main
+
+func main() {}
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	os.WriteFile(path, []byte(src), 0o644)
+
+	g := graph.New()
+	if err := ParseFile(g, path); err != nil {
+		t.Fatal(err)
+	}
+
+	// go:build should be on the file node.
+	fileNode, ok := g.GetNode("file:" + path)
+	if !ok {
+		t.Fatal("missing file node")
+	}
+	if got := fileNode.Metadata["go:build"]; got != "linux && amd64" {
+		t.Errorf("file go:build = %q, want %q", got, "linux && amd64")
+	}
+}
