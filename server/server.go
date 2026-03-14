@@ -12,6 +12,7 @@ import (
 
 	"github.com/matt/azstral/ccgf"
 	"github.com/matt/azstral/codegen"
+	"github.com/matt/azstral/edit"
 	"github.com/matt/azstral/graph"
 	"github.com/matt/azstral/parser"
 	"github.com/matt/azstral/query"
@@ -211,6 +212,16 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		if err := g.AddNode(n); err != nil {
 			return toolError(err.Error()), nil, nil
 		}
+		// Sync new function nodes directly to disk — no write_file needed.
+		if n.Kind == graph.KindFunction && n.File != "" && n.Text != "" {
+			filePath := strings.TrimPrefix(n.File, "file:")
+			params := n.Metadata["params"]
+			returns := n.Metadata["returns"]
+			receiver := n.Metadata["receiver"]
+			if err := edit.AppendFunction(filePath, n.Name, receiver, params, returns, n.Text); err != nil {
+				return toolJSON(map[string]any{"id": n.ID, "warning": err.Error()}), nil, nil
+			}
+		}
 		return toolText(fmt.Sprintf("added node %s (%s)", n.ID, n.Kind)), nil, nil
 	})
 
@@ -273,6 +284,14 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			return toolError(err.Error()), nil, nil
 		}
 		node, _ := g.GetNode(input.ID)
+		// Sync function body changes directly to disk — no write_file needed.
+		if input.Text != nil && node.Kind == graph.KindFunction && node.File != "" {
+			filePath := strings.TrimPrefix(node.File, "file:")
+			if err := edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *input.Text); err != nil {
+				// Non-fatal: graph is updated, file patch failed. Return warning.
+				return toolJSON(map[string]any{"node": node, "warning": err.Error()}), nil, nil
+			}
+		}
 		return toolJSON(node), nil, nil
 	})
 
