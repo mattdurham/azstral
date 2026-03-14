@@ -156,6 +156,26 @@ func (g *Graph) AddEdge(from, to string, kind EdgeKind) error {
 	return nil
 }
 
+// RemoveEdge removes a directed edge. Returns error if no matching edge exists.
+func (g *Graph) RemoveEdge(from, to string, kind EdgeKind) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for _, e := range g.Edges {
+		if e.From == from && e.To == to && e.Kind == kind {
+			continue // drop this edge
+		}
+		g.Edges[n] = e
+		n++
+	}
+	removed := len(g.Edges) - n
+	g.Edges = g.Edges[:n]
+	if removed == 0 {
+		return fmt.Errorf("edge %s -[%s]-> %s not found", from, kind, to)
+	}
+	return nil
+}
+
 // NodesByKind returns all nodes of a given kind.
 func (g *Graph) NodesByKind(kind NodeKind) []*Node {
 	g.mu.RLock()

@@ -50,3 +50,25 @@ func TestNodesByKind(t *testing.T) {
 		t.Errorf("got %d functions, want 2", len(fns))
 	}
 }
+
+func TestRemoveEdge(t *testing.T) {
+	g := New()
+	g.AddNode(&Node{ID: "a", Kind: KindPackage, Name: "a"})
+	g.AddNode(&Node{ID: "b", Kind: KindFunction, Name: "b"})
+	g.AddEdge("a", "b", EdgeContains)
+	g.AddEdge("a", "b", EdgeCalls) // second edge, different kind
+
+	// Remove one edge.
+	if err := g.RemoveEdge("a", "b", EdgeContains); err != nil {
+		t.Fatalf("RemoveEdge: %v", err)
+	}
+	edges := g.EdgesFrom("a")
+	if len(edges) != 1 || edges[0].Kind != EdgeCalls {
+		t.Errorf("expected 1 remaining edge (calls), got %v", edges)
+	}
+
+	// Remove non-existent edge returns error.
+	if err := g.RemoveEdge("a", "b", EdgeContains); err == nil {
+		t.Error("expected error removing non-existent edge")
+	}
+}

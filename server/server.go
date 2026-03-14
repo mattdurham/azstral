@@ -285,6 +285,42 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		}
 		return toolText(msg), nil, nil
 	})
+
+	type deleteEdgeInput struct {
+		From string `json:"from" jsonschema:"source node ID"`
+		To   string `json:"to" jsonschema:"target node ID"`
+		Kind string `json:"kind" jsonschema:"edge kind: contains, calls, callee, references, annotates, covers"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "delete_edge",
+		Description: "Remove a directed edge between two nodes. Useful for correcting spurious edges before rendering a file.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input deleteEdgeInput) (*mcp.CallToolResult, any, error) {
+		if err := g.RemoveEdge(input.From, input.To, graph.EdgeKind(input.Kind)); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(fmt.Sprintf("removed edge %s -[%s]-> %s", input.From, input.Kind, input.To)), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "delete_edges",
+		Description: "Remove multiple edges in a single call. Returns count removed and any errors.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addEdgesInput) (*mcp.CallToolResult, any, error) {
+		var errs []string
+		removed := 0
+		for _, item := range input.Edges {
+			if err := g.RemoveEdge(item.From, item.To, graph.EdgeKind(item.Kind)); err != nil {
+				errs = append(errs, fmt.Sprintf("%s→%s: %v", item.From, item.To, err))
+			} else {
+				removed++
+			}
+		}
+		msg := fmt.Sprintf("removed %d/%d edges", removed, len(input.Edges))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
+	})
 }
 
 // --- Spec store tools ---
