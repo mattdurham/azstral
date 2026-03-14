@@ -13,7 +13,7 @@ import (
 
 func setupTestServer(t *testing.T) *mcp.ClientSession {
 	t.Helper()
-	srv, err := New(":memory:")
+	srv, err := New(":memory:", "")
 	if err != nil {
 		t.Fatal(err)
 	}

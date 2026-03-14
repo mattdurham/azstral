@@ -16,9 +16,10 @@ import (
 
 func main() {
 	dbPath := flag.String("db", defaultDBPath(), "path to SQLite database")
+	root := flag.String("root", defaultRoot(), "working directory to auto-parse on startup")
 	flag.Parse()
 
-	srv, err := server.New(*dbPath)
+	srv, err := server.New(*dbPath, *root)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -26,6 +27,14 @@ func main() {
 	if err := srv.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func defaultRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func defaultDBPath() string {

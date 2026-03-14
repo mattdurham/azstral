@@ -19,12 +19,33 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 // New creates an MCP server with all azstral tools registered.
+// root is the working directory for this server — it is auto-parsed on startup
+// and used as the default path for parse_tree and reset_graph. Pass "" to skip
+// auto-parse (useful for tests or when the caller will parse manually).
 // The SQLite database is created at dbPath (use ":memory:" for in-memory).
-func New(dbPath string) (*mcp.Server, error) {
+func New(dbPath, root string) (*mcp.Server, error) {
 	g := graph.New()
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
+	}
+
+	// Auto-parse the working root so the graph is ready immediately.
+	var parseMsg string
+	if root != "" {
+		n, perr := parser.ParseTree(g, root)
+		if perr != nil {
+			return nil, fmt.Errorf("parse root %s: %w", root, perr)
+		}
+		parseMsg = fmt.Sprintf(" Parsed %d files from %s.", n, root)
+	}
+
+	instructions := "Azstral represents Go code as a connected graph. " +
+		"The graph is already loaded — use encode_ccgf or query_nodes to explore it. " +
+		"Modify code with update_node/add_node/add_edge, then write_file to persist." +
+		parseMsg
+	if root != "" {
+		instructions += fmt.Sprintf(" Working root: %s.", root)
 	}
 
 	srv := mcp.NewServer(
@@ -32,19 +53,17 @@ func New(dbPath string) (*mcp.Server, error) {
 			Name:    "azstral",
 			Version: "0.1.0",
 		},
-		&mcp.ServerOptions{
-			Instructions: "Azstral represents Go code as a connected graph. " +
-				"Build code by adding nodes/edges, create specs in the database, then render to Go source.",
-		},
+		&mcp.ServerOptions{Instructions: instructions},
 	)
 
-	registerParseTools(srv, g)
+	registerParseTools(srv, g, root)
 	registerQueryTools(srv, g)
 	registerMutationTools(srv, g)
 	registerSpecTools(srv, g, st)
 	registerCodegenTools(srv, g, st)
 	registerCCGFTools(srv, g)
 	registerCELTools(srv, g)
+	registerGraphTools(srv, g, root)
 	return srv, nil
 }
 
@@ -67,7 +86,7 @@ type listEdgesInput struct {
 }
 
 // --- Parse tools ---
-func registerParseTools(srv *mcp.Server, g *graph.Graph) {
+func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "parse_file",
 		Description: "Parse a Go source file and add its AST to the graph.",
@@ -94,18 +113,26 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph) {
 		return toolText(fmt.Sprintf("parsed dir %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
 	})
 
+	desc := "Recursively parse all Go files under a directory tree. Skips vendor, .git, node_modules, and testdata directories."
+	if root != "" {
+		desc += fmt.Sprintf(" Omit path to re-parse the working root (%s).", root)
+	}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "parse_tree",
-		Description: "Recursively parse all Go files under a directory tree. Skips vendor, .git, node_modules, and testdata directories.",
+		Description: desc,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
-		if input.Path == "" {
-			return toolError("path is required"), nil, nil
+		path := input.Path
+		if path == "" {
+			if root == "" {
+				return toolError("path is required (no working root configured)"), nil, nil
+			}
+			path = root
 		}
-		n, err := parser.ParseTree(g, input.Path)
+		n, err := parser.ParseTree(g, path)
 		if err != nil {
 			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
 		}
-		return toolText(fmt.Sprintf("parsed tree %s — %d files, %d nodes", input.Path, n, len(g.Nodes))), nil, nil
+		return toolText(fmt.Sprintf("parsed tree %s — %d files, %d nodes", path, n, len(g.Nodes))), nil, nil
 	})
 }
 
@@ -599,5 +626,29 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 		Description: "Return the CEL query language documentation — available fields, operators, and examples for query_nodes and query_edges.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 		return toolText(query.Help), nil, nil
+	})
+}
+
+// --- Graph management tools ---
+
+func registerGraphTools(srv *mcp.Server, g *graph.Graph, root string) {
+	desc := "Clear the in-memory graph and re-parse from the working root. " +
+		"Use this when the graph has become stale or contaminated from parsing multiple projects."
+	if root != "" {
+		desc += fmt.Sprintf(" Working root: %s.", root)
+	}
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "reset_graph",
+		Description: desc,
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		g.Reset()
+		if root == "" {
+			return toolText("graph cleared (no working root to re-parse)"), nil, nil
+		}
+		n, err := parser.ParseTree(g, root)
+		if err != nil {
+			return toolError(fmt.Sprintf("re-parse error: %v", err)), nil, nil
+		}
+		return toolText(fmt.Sprintf("graph reset — parsed %d files, %d nodes from %s", n, len(g.Nodes), root)), nil, nil
 	})
 }

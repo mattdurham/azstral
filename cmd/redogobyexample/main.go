@@ -125,7 +125,7 @@ func processExample(name, slug string) error {
 	dstFile := filepath.Join(destRoot, slug, dstBase)
 
 	// Fresh server + in-memory session per example.
-	srv, err := server.New(":memory:")
+	srv, err := server.New(":memory:", "")
 	if err != nil {
 		return err
 	}

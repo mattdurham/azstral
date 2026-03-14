@@ -156,6 +156,14 @@ func (g *Graph) AddEdge(from, to string, kind EdgeKind) error {
 	return nil
 }
 
+// Reset clears all nodes and edges from the graph.
+func (g *Graph) Reset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Nodes = make(map[string]*Node)
+	g.Edges = nil
+}
+
 // RemoveEdge removes a directed edge. Returns error if no matching edge exists.
 func (g *Graph) RemoveEdge(from, to string, kind EdgeKind) error {
 	g.mu.Lock()

@@ -17,7 +17,7 @@ func main() {
 	root := projectRoot()
 	helloPath := filepath.Join(root, "cmd", "hello", "main.go")
 
-	srv, err := server.New(":memory:")
+	srv, err := server.New(":memory:", "")
 	if err != nil {
 		log.Fatal(err)
 	}
