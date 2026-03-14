@@ -426,7 +426,7 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 		case *ast.ImportSpec:
 			pos := fset.Position(s.Pos())
 			path := strings.Trim(s.Path.Value, `"`)
-			importID := fmt.Sprintf("import:%s", path)
+			importID := fmt.Sprintf("import:%s:%s", fileID, path)
 			meta := map[string]string{}
 			if s.Name != nil {
 				meta["alias"] = s.Name.Name

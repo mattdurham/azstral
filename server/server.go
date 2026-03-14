@@ -2,16 +2,69 @@
 // SPEC-003: Expose the code graph via an MCP server.
 package server
 
-import (
-	"encoding/json"
+// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
+// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
+// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
 
+// SPEC-11.5: auto-parsed body columns — parseLogBody detects JSON vs logfmt
+// and returns all top-level extracted fields as map[string]string.
+// Returns nil on empty body or parse failure (silent-failure policy — NOTE-007).
+
+// Prefixes are the literal prefix strings extracted from the pattern.
+// For simple patterns like "foo.*" this is ["foo"].
+// For alternations like "error|warn" this is ["error", "warn"].
+// Stack pointer
+// Program counter (current instruction index)
+// DataMB is the approximate target dataset size in megabytes.
+
+// Window is the time range over which log timestamps are distributed.
+// nil after phase 2
+// TopKSize is the maximum number of top-K entries stored per column per block.
+// width per row
+// CaseInsensitive is true when the pattern uses (?i) flag.
+// The caller must handle case-folding for range lookups.
+// 16 registers
+// "SPECS", "NOTES", "TESTS", "BENCHMARKS"
+// OnStats is an optional callback invoked after execution with I/O statistics.
+// -1 = root; set during phase 2
+// number of rows (hash functions)
+// relative path from repo root, e.g. "internal/executor"
+// 512 bytes: 64 × 4 × 2 bytes per uint16
+// SketchPresent is true when the file contains a sketch index section.
+// bias correction for p=4
+// --- memProvider: minimal in-memory ReaderProvider for tests ---
+// TopKMaxKeyLen is the maximum byte length for a TopK key. Longer keys are truncated.
+// relative path from repo root
+// README.md content
+// Start is the beginning of the time window.
+// If zero, defaults to 2024-01-01T00:00:00Z.
+// 16 bytes
+// Queries matching <100 traces
+// cmsKnuth is the multiplicative constant for deriving independent hash row values.
+// SketchBlockCount is the number of blocks with at least one sketched column.
+// StagingDir is a local directory for staging output files.
+// If empty, os.TempDir() is used.
+// IsLiteralContains is true when the pattern is equivalent to strings.Contains
+// (or strings.Contains(strings.ToLower(v), prefix) for CaseInsensitive).
+// True for pure literals and alternations of literals with no anchors.
+// When true, the regex engine can be bypassed entirely.
+// SketchUncompressedBytes is the estimated uncompressed size of the sketch section.
+// LogAttrs holds log.* ColumnTypeString column values keyed by full column name
+// (e.g. "log.detected_level"). These are original LogRecord attributes and must be
+// exposed with the "log." prefix intact so callers (e.g. extractStructuredMetadata)
+// can distinguish them from pipeline-derived labels. Nil when none present.
+// label name (e.g. "service.name") → index into colNames
+import (
 	"github.com/matt/azstral/ccgf"
-	"github.com/matt/azstral/codegen"
+
 	"github.com/matt/azstral/graph"
-	"github.com/matt/azstral/parser"
+	"encoding/json"
 	"github.com/matt/azstral/store"
-	"context"
+	"github.com/matt/azstral/codegen"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/matt/azstral/parser"
+
+	"context"
 
 	"fmt"
 
@@ -22,6 +75,8 @@ import (
 )
 // New creates an MCP server with all azstral tools registered.
 // The SQLite database is created at dbPath (use ":memory:" for in-memory).
+
+// New returns a new Executor.
 func New(dbPath string) (*mcp.Server, error) {
 	g := graph.New()
 	st, err := store.Open(dbPath)
@@ -185,6 +240,39 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		return toolText(fmt.Sprintf("added node %s (%s)", n.ID, n.Kind)), nil, nil
 	})
 
+	type addNodesInput struct {
+		Nodes []addNodeInput `json:"nodes" jsonschema:"array of nodes to add"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_nodes",
+		Description: "Add multiple nodes to the code graph in a single call. Returns count of nodes added and any errors.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addNodesInput) (*mcp.CallToolResult, any, error) {
+		var errs []string
+		added := 0
+		for _, item := range input.Nodes {
+			n := &graph.Node{
+				ID:       item.ID,
+				Kind:     graph.NodeKind(item.Kind),
+				Name:     item.Name,
+				Text:     item.Text,
+				File:     item.File,
+				Line:     item.Line,
+				Metadata: item.Metadata,
+			}
+			if err := g.AddNode(n); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", item.ID, err))
+			} else {
+				added++
+			}
+		}
+		msg := fmt.Sprintf("added %d/%d nodes", added, len(input.Nodes))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
+	})
+
 	type updateNodeInput struct {
 		ID       string            `json:"id" jsonschema:"node ID to update"`
 		Name     *string           `json:"name,omitempty" jsonschema:"new name"`
@@ -228,6 +316,30 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			return toolError(err.Error()), nil, nil
 		}
 		return toolText(fmt.Sprintf("added edge %s -[%s]-> %s", input.From, input.Kind, input.To)), nil, nil
+	})
+
+	type addEdgesInput struct {
+		Edges []addEdgeInput `json:"edges" jsonschema:"array of edges to add"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_edges",
+		Description: "Add multiple edges to the code graph in a single call. Returns count of edges added and any errors.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addEdgesInput) (*mcp.CallToolResult, any, error) {
+		var errs []string
+		added := 0
+		for _, item := range input.Edges {
+			if err := g.AddEdge(item.From, item.To, graph.EdgeKind(item.Kind)); err != nil {
+				errs = append(errs, fmt.Sprintf("%s→%s: %v", item.From, item.To, err))
+			} else {
+				added++
+			}
+		}
+		msg := fmt.Sprintf("added %d/%d edges", added, len(input.Edges))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
 	})
 }
 

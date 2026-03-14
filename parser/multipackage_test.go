@@ -148,6 +148,65 @@ func TestParseTree_CommentIDUniqueness(t *testing.T) {
 	}
 }
 
+// TestParseTree_ImportAlias verifies that two files importing the same package
+// with different aliases each get their own import node with the correct alias.
+func TestParseTree_ImportAlias(t *testing.T) {
+	root := t.TempDir()
+
+	aDir := filepath.Join(root, "a")
+	bDir := filepath.Join(root, "b")
+	os.MkdirAll(aDir, 0o755)
+	os.MkdirAll(bDir, 0o755)
+
+	// File A imports encoding/json with alias "j".
+	writeTestFile(t, filepath.Join(aDir, "a.go"), `package a
+
+import j "encoding/json"
+
+func F() { j.Marshal(nil) }
+`)
+
+	// File B imports encoding/json without alias.
+	writeTestFile(t, filepath.Join(bDir, "b.go"), `package b
+
+import "encoding/json"
+
+func G() { json.Marshal(nil) }
+`)
+
+	g := graph.New()
+	if _, err := ParseTree(g, root); err != nil {
+		t.Fatal(err)
+	}
+
+	fileA := "file:" + filepath.Join(aDir, "a.go")
+	fileB := "file:" + filepath.Join(bDir, "b.go")
+
+	// Find the import node for encoding/json in each file.
+	aliasA, aliasB := "", "NOT_FOUND"
+	for _, n := range g.NodesByKind(graph.KindImport) {
+		if n.File != fileA && n.File != fileB {
+			continue
+		}
+		if n.Name != "encoding/json" {
+			continue
+		}
+		if n.File == fileA {
+			aliasA = n.Metadata["alias"]
+		}
+		if n.File == fileB {
+			aliasB = n.Metadata["alias"]
+		}
+	}
+
+	if aliasA != "j" {
+		t.Errorf("file A import alias = %q, want %q", aliasA, "j")
+	}
+	if aliasB != "" {
+		t.Errorf("file B import alias = %q, want empty (no alias)", aliasB)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
