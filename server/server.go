@@ -1,0 +1,420 @@
+// Package server provides the MCP server for azstral.
+// SPEC-003: Expose the code graph via an MCP server.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/matt/azstral/ccgf"
+	"github.com/matt/azstral/codegen"
+	"github.com/matt/azstral/graph"
+	"github.com/matt/azstral/parser"
+	"github.com/matt/azstral/store"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// New creates an MCP server with all azstral tools registered.
+// The SQLite database is created at dbPath (use ":memory:" for in-memory).
+func New(dbPath string) (*mcp.Server, error) {
+	g := graph.New()
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+
+	srv := mcp.NewServer(
+		&mcp.Implementation{
+			Name:    "azstral",
+			Version: "0.1.0",
+		},
+		&mcp.ServerOptions{
+			Instructions: "Azstral represents Go code as a connected graph. " +
+				"Build code by adding nodes/edges, create specs in the database, then render to Go source.",
+		},
+	)
+
+	registerParseTools(srv, g)
+	registerQueryTools(srv, g)
+	registerMutationTools(srv, g)
+	registerSpecTools(srv, g, st)
+	registerCodegenTools(srv, g, st)
+	registerCCGFTools(srv, g)
+	return srv, nil
+}
+
+// --- Input types ---
+
+type pathInput struct {
+	Path string `json:"path" jsonschema:"absolute file or directory path"`
+}
+
+type nodeIDInput struct {
+	ID string `json:"id" jsonschema:"node ID (e.g. func:main, pkg:main, file:main.go)"`
+}
+
+type listNodesInput struct {
+	Kind string `json:"kind,omitempty" jsonschema:"filter by node kind: package, file, function, type, variable, comment, spec, import, statement"`
+}
+
+type listEdgesInput struct {
+	From string `json:"from,omitempty" jsonschema:"filter edges from this node ID"`
+	To   string `json:"to,omitempty" jsonschema:"filter edges to this node ID"`
+}
+
+// --- Parse tools ---
+
+func registerParseTools(srv *mcp.Server, g *graph.Graph) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "parse_file",
+		Description: "Parse a Go source file and add its AST to the graph.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
+		if input.Path == "" {
+			return toolError("path is required"), nil, nil
+		}
+		if err := parser.ParseFile(g, input.Path); err != nil {
+			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
+		}
+		return toolText(fmt.Sprintf("parsed %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "parse_dir",
+		Description: "Parse all Go files in a directory.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
+		if input.Path == "" {
+			return toolError("path is required"), nil, nil
+		}
+		if err := parser.ParseDir(g, input.Path); err != nil {
+			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
+		}
+		return toolText(fmt.Sprintf("parsed dir %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
+	})
+}
+
+// --- Query tools ---
+
+func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_graph",
+		Description: "Return the full code graph as JSON.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		return toolJSON(g), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_node",
+		Description: "Return a single graph node by ID.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input nodeIDInput) (*mcp.CallToolResult, any, error) {
+		node, ok := g.GetNode(input.ID)
+		if !ok {
+			return toolError(fmt.Sprintf("node %q not found", input.ID)), nil, nil
+		}
+		return toolJSON(node), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_nodes",
+		Description: "List graph nodes, optionally filtered by kind.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input listNodesInput) (*mcp.CallToolResult, any, error) {
+		if input.Kind != "" {
+			return toolJSON(g.NodesByKind(graph.NodeKind(input.Kind))), nil, nil
+		}
+		return toolJSON(g.Nodes), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_edges",
+		Description: "List graph edges, optionally filtered by from/to node ID.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input listEdgesInput) (*mcp.CallToolResult, any, error) {
+		if input.From != "" {
+			return toolJSON(g.EdgesFrom(input.From)), nil, nil
+		}
+		if input.To != "" {
+			return toolJSON(g.EdgesTo(input.To)), nil, nil
+		}
+		return toolJSON(g.Edges), nil, nil
+	})
+}
+
+// --- Mutation tools ---
+
+func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
+	type addNodeInput struct {
+		ID       string            `json:"id" jsonschema:"unique node ID, e.g. pkg:main, file:main.go, func:main"`
+		Kind     string            `json:"kind" jsonschema:"node kind: package, file, function, type, variable, comment, import, statement"`
+		Name     string            `json:"name" jsonschema:"node name (package name, function name, import path, etc.)"`
+		Text     string            `json:"text,omitempty" jsonschema:"text content: function body, statement code, comment text, type definition"`
+		File     string            `json:"file,omitempty" jsonschema:"source file path this node belongs to"`
+		Line     int               `json:"line,omitempty" jsonschema:"line number for ordering within parent"`
+		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"key-value metadata: alias, params, returns, receiver, const, type"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_node",
+		Description: "Add a node to the code graph. Use kind to specify what it represents (package, file, function, import, statement, etc.).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addNodeInput) (*mcp.CallToolResult, any, error) {
+		n := &graph.Node{
+			ID:       input.ID,
+			Kind:     graph.NodeKind(input.Kind),
+			Name:     input.Name,
+			Text:     input.Text,
+			File:     input.File,
+			Line:     input.Line,
+			Metadata: input.Metadata,
+		}
+		if err := g.AddNode(n); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(fmt.Sprintf("added node %s (%s)", n.ID, n.Kind)), nil, nil
+	})
+
+	type updateNodeInput struct {
+		ID       string            `json:"id" jsonschema:"node ID to update"`
+		Name     *string           `json:"name,omitempty" jsonschema:"new name"`
+		Text     *string           `json:"text,omitempty" jsonschema:"new text content (function body, statement code, etc.)"`
+		File     *string           `json:"file,omitempty" jsonschema:"new file path"`
+		Line     *int              `json:"line,omitempty" jsonschema:"new line number"`
+		EndLine  *int              `json:"end_line,omitempty" jsonschema:"new end line"`
+		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"metadata keys to set or update"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_node",
+		Description: "Update fields on an existing graph node. Only provided fields are changed; omitted fields are left as-is.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input updateNodeInput) (*mcp.CallToolResult, any, error) {
+		patch := graph.NodePatch{
+			Name:     input.Name,
+			Text:     input.Text,
+			File:     input.File,
+			Line:     input.Line,
+			EndLine:  input.EndLine,
+			Metadata: input.Metadata,
+		}
+		if err := g.UpdateNode(input.ID, patch); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		node, _ := g.GetNode(input.ID)
+		return toolJSON(node), nil, nil
+	})
+
+	type addEdgeInput struct {
+		From string `json:"from" jsonschema:"source node ID"`
+		To   string `json:"to" jsonschema:"target node ID"`
+		Kind string `json:"kind" jsonschema:"edge kind: contains, calls, references, annotates, covers"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_edge",
+		Description: "Add a directed edge between two nodes. Use 'contains' for parent-child (package→file, file→function), 'calls' for call relationships, 'annotates' for comment→code.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addEdgeInput) (*mcp.CallToolResult, any, error) {
+		if err := g.AddEdge(input.From, input.To, graph.EdgeKind(input.Kind)); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(fmt.Sprintf("added edge %s -[%s]-> %s", input.From, input.Kind, input.To)), nil, nil
+	})
+}
+
+// --- Spec store tools ---
+
+func registerSpecTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
+	type createSpecInput struct {
+		ID        string `json:"id" jsonschema:"globally unique spec ID, e.g. SPEC-001, NOTE-003, TEST-006, BENCH-001"`
+		Kind      string `json:"kind" jsonschema:"SPEC, NOTE, TEST, or BENCH"`
+		Namespace string `json:"namespace,omitempty" jsonschema:"namespace scope, e.g. io, graph, codegen. Empty for root."`
+		Title     string `json:"title" jsonschema:"short title describing the spec"`
+		Body      string `json:"body,omitempty" jsonschema:"full description"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "create_spec",
+		Description: "Create a spec/note/test/benchmark in the database. IDs are globally unique but scoped by namespace.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input createSpecInput) (*mcp.CallToolResult, any, error) {
+		sp := &store.Spec{
+			ID:        strings.ToUpper(input.ID),
+			Kind:      strings.ToUpper(input.Kind),
+			Namespace: input.Namespace,
+			Title:     input.Title,
+			Body:      input.Body,
+		}
+		if err := st.CreateSpec(sp); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(fmt.Sprintf("created %s in namespace %q", sp.ID, sp.Namespace)), nil, nil
+	})
+
+	type getSpecInput struct {
+		ID string `json:"id" jsonschema:"spec ID, e.g. SPEC-001"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_spec",
+		Description: "Get a spec by its ID from the database.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input getSpecInput) (*mcp.CallToolResult, any, error) {
+		sp, err := st.GetSpec(strings.ToUpper(input.ID))
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolJSON(sp), nil, nil
+	})
+
+	type listSpecsInput struct {
+		Kind      string `json:"kind,omitempty" jsonschema:"filter by kind: SPEC, NOTE, TEST, BENCH"`
+		Namespace string `json:"namespace,omitempty" jsonschema:"filter by namespace"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_specs",
+		Description: "List specs from the database, optionally filtered by kind and/or namespace.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input listSpecsInput) (*mcp.CallToolResult, any, error) {
+		specs, err := st.ListSpecs(strings.ToUpper(input.Kind), input.Namespace)
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolJSON(specs), nil, nil
+	})
+
+	type linkSpecInput struct {
+		SpecID string `json:"spec_id" jsonschema:"spec ID to link, e.g. SPEC-004"`
+		NodeID string `json:"node_id" jsonschema:"graph node ID to link to, e.g. func:main"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "link_spec",
+		Description: "Link a spec to a graph node. This creates a coverage relationship — the spec applies to that code.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input linkSpecInput) (*mcp.CallToolResult, any, error) {
+		if err := st.LinkSpec(strings.ToUpper(input.SpecID), input.NodeID); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(fmt.Sprintf("linked %s → %s", input.SpecID, input.NodeID)), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "find_spec",
+		Description: "Find which graph nodes a spec covers, pulling data from both the store and the graph.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input getSpecInput) (*mcp.CallToolResult, any, error) {
+		id := strings.ToUpper(input.ID)
+		sp, err := st.GetSpec(id)
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		links, _ := st.GetLinks(id)
+
+		type result struct {
+			Spec  *store.Spec    `json:"spec"`
+			Nodes []*graph.Node  `json:"nodes"`
+			Links []string       `json:"links"`
+		}
+		r := result{Spec: sp, Links: links}
+		for _, nodeID := range links {
+			if n, ok := g.GetNode(nodeID); ok {
+				r.Nodes = append(r.Nodes, n)
+			}
+		}
+		return toolJSON(r), nil, nil
+	})
+}
+
+// --- Codegen tools ---
+
+func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "render",
+		Description: "Render a file node from the graph into Go source code. Returns the generated source as text.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input nodeIDInput) (*mcp.CallToolResult, any, error) {
+		src, err := codegen.RenderFile(g, st, input.ID)
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		return toolText(src), nil, nil
+	})
+
+	type writeFileInput struct {
+		FileNodeID string `json:"file_node_id" jsonschema:"file node ID to render, e.g. file:main.go"`
+		OutputPath string `json:"output_path" jsonschema:"path to write the generated Go file"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "write_file",
+		Description: "Render a file node to Go source and write it to disk.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input writeFileInput) (*mcp.CallToolResult, any, error) {
+		src, err := codegen.RenderFile(g, st, input.FileNodeID)
+		if err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		if err := os.MkdirAll(filepath.Dir(input.OutputPath), 0o755); err != nil {
+			return toolError(fmt.Sprintf("mkdir: %v", err)), nil, nil
+		}
+		if err := os.WriteFile(input.OutputPath, []byte(src), 0o644); err != nil {
+			return toolError(fmt.Sprintf("write: %v", err)), nil, nil
+		}
+		return toolText(fmt.Sprintf("wrote %s (%d bytes)", input.OutputPath, len(src))), nil, nil
+	})
+}
+
+// --- Helpers ---
+
+func toolText(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: text},
+		},
+	}
+}
+
+func toolError(msg string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: msg},
+		},
+		IsError: true,
+	}
+}
+
+func toolJSON(v any) *mcp.CallToolResult {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return toolError(fmt.Sprintf("json marshal error: %v", err))
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(data)},
+		},
+	}
+}
+
+// --- CCGF tools ---
+
+func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
+	type ccgfInput struct {
+		Scope  string `json:"scope,omitempty" jsonschema:"scope: 'program' (default), 'file:<id>' for single file, 'type:<id>' for single type and its methods"`
+		Vendor string `json:"vendor,omitempty" jsonschema:"vendor mode: 'surface' (default, 1 layer of API used), 'include' (full vendor tree)"`
+		Attrs  bool   `json:"attrs,omitempty" jsonschema:"emit attribute lines (sig, loc, kind, ro)"`
+		Module string `json:"module,omitempty" jsonschema:"module path for header"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "encode_ccgf",
+		Description: "Encode the graph in Compact Code Graph Format (CCGF). " +
+			"Returns a compact, line-based representation of program structure " +
+			"with typed nodes, typed edges, and optional attributes. " +
+			"Much smaller than JSON for LLM consumption.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ccgfInput) (*mcp.CallToolResult, any, error) {
+		opts := ccgf.Options{
+			Scope:  input.Scope,
+			Attrs:  input.Attrs,
+			Module: input.Module,
+		}
+		switch strings.ToLower(input.Vendor) {
+		case "include":
+			opts.Vendor = ccgf.VendorInclude
+		default:
+			opts.Vendor = ccgf.VendorSurface
+		}
+		return toolText(ccgf.Encode(g, opts)), nil, nil
+	})
+}
