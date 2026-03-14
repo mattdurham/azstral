@@ -2,81 +2,24 @@
 // SPEC-003: Expose the code graph via an MCP server.
 package server
 
-// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
-// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
-// NOTE: Any changes to this file must be reflected in the corresponding SPECS.md or NOTES.md.
-
-// SPEC-11.5: auto-parsed body columns — parseLogBody detects JSON vs logfmt
-// and returns all top-level extracted fields as map[string]string.
-// Returns nil on empty body or parse failure (silent-failure policy — NOTE-007).
-
-// Prefixes are the literal prefix strings extracted from the pattern.
-// For simple patterns like "foo.*" this is ["foo"].
-// For alternations like "error|warn" this is ["error", "warn"].
-// Stack pointer
-// Program counter (current instruction index)
-// DataMB is the approximate target dataset size in megabytes.
-
-// Window is the time range over which log timestamps are distributed.
-// nil after phase 2
-// TopKSize is the maximum number of top-K entries stored per column per block.
-// width per row
-// CaseInsensitive is true when the pattern uses (?i) flag.
-// The caller must handle case-folding for range lookups.
-// 16 registers
-// "SPECS", "NOTES", "TESTS", "BENCHMARKS"
-// OnStats is an optional callback invoked after execution with I/O statistics.
-// -1 = root; set during phase 2
-// number of rows (hash functions)
-// relative path from repo root, e.g. "internal/executor"
-// 512 bytes: 64 × 4 × 2 bytes per uint16
-// SketchPresent is true when the file contains a sketch index section.
-// bias correction for p=4
-// --- memProvider: minimal in-memory ReaderProvider for tests ---
-// TopKMaxKeyLen is the maximum byte length for a TopK key. Longer keys are truncated.
-// relative path from repo root
-// README.md content
-// Start is the beginning of the time window.
-// If zero, defaults to 2024-01-01T00:00:00Z.
-// 16 bytes
-// Queries matching <100 traces
-// cmsKnuth is the multiplicative constant for deriving independent hash row values.
-// SketchBlockCount is the number of blocks with at least one sketched column.
-// StagingDir is a local directory for staging output files.
-// If empty, os.TempDir() is used.
-// IsLiteralContains is true when the pattern is equivalent to strings.Contains
-// (or strings.Contains(strings.ToLower(v), prefix) for CaseInsensitive).
-// True for pure literals and alternations of literals with no anchors.
-// When true, the regex engine can be bypassed entirely.
-// SketchUncompressedBytes is the estimated uncompressed size of the sketch section.
-// LogAttrs holds log.* ColumnTypeString column values keyed by full column name
-// (e.g. "log.detected_level"). These are original LogRecord attributes and must be
-// exposed with the "log." prefix intact so callers (e.g. extractStructuredMetadata)
-// can distinguish them from pipeline-derived labels. Nil when none present.
-// label name (e.g. "service.name") → index into colNames
 import (
-	"github.com/matt/azstral/ccgf"
-
-	"github.com/matt/azstral/graph"
-	"encoding/json"
-	"github.com/matt/azstral/store"
-	"github.com/matt/azstral/codegen"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/matt/azstral/parser"
-
 	"context"
-
+	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
-
 	"strings"
+
+	"github.com/matt/azstral/ccgf"
+	"github.com/matt/azstral/codegen"
+	"github.com/matt/azstral/graph"
+	"github.com/matt/azstral/parser"
+	"github.com/matt/azstral/query"
+	"github.com/matt/azstral/store"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 // New creates an MCP server with all azstral tools registered.
 // The SQLite database is created at dbPath (use ":memory:" for in-memory).
-
-// New returns a new Executor.
 func New(dbPath string) (*mcp.Server, error) {
 	g := graph.New()
 	st, err := store.Open(dbPath)
@@ -101,6 +44,7 @@ func New(dbPath string) (*mcp.Server, error) {
 	registerSpecTools(srv, g, st)
 	registerCodegenTools(srv, g, st)
 	registerCCGFTools(srv, g)
+	registerCELTools(srv, g)
 	return srv, nil
 }
 
@@ -562,5 +506,62 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 			return toolText("no dead code found"), nil, nil
 		}
 		return toolJSON(dead), nil, nil
+	})
+}
+
+// --- CEL query tools ---
+
+func registerCELTools(srv *mcp.Server, g *graph.Graph) {
+	type celInput struct {
+		Expr string `json:"expr" jsonschema:"CEL expression to evaluate against each node or edge. Call query_help for available fields and examples."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "query_nodes",
+		Description: "Query graph nodes using a CEL expression. " +
+			"Returns all nodes where the expression is true. " +
+			"Available fields: id, kind, name, file, line, text, external, " +
+			"cyclomatic, cognitive, receiver, params, returns, parent_id, " +
+			"callee_ids, caller_ids, child_ids. " +
+			"Call query_help for full documentation and examples.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input celInput) (*mcp.CallToolResult, any, error) {
+		if input.Expr == "" {
+			return toolError("expr is required"), nil, nil
+		}
+		nodes, err := query.NodeQuery(g, input.Expr)
+		if err != nil {
+			return toolError(fmt.Sprintf("query error: %v", err)), nil, nil
+		}
+		if len(nodes) == 0 {
+			return toolText("no matches"), nil, nil
+		}
+		return toolJSON(nodes), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "query_edges",
+		Description: "Query graph edges using a CEL expression. " +
+			"Returns all edges where the expression is true. " +
+			"Available fields: from, to, kind. " +
+			"Call query_help for full documentation and examples.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input celInput) (*mcp.CallToolResult, any, error) {
+		if input.Expr == "" {
+			return toolError("expr is required"), nil, nil
+		}
+		edges, err := query.EdgeQuery(g, input.Expr)
+		if err != nil {
+			return toolError(fmt.Sprintf("query error: %v", err)), nil, nil
+		}
+		if len(edges) == 0 {
+			return toolText("no matches"), nil, nil
+		}
+		return toolJSON(edges), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "query_help",
+		Description: "Return the CEL query language documentation — available fields, operators, and examples for query_nodes and query_edges.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		return toolText(query.Help), nil, nil
 	})
 }

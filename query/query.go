@@ -1,0 +1,304 @@
+// Package query provides CEL-based querying of the code graph.
+//
+// Node queries evaluate a CEL expression against every node, returning matches.
+// Edge queries evaluate against every edge.
+//
+// Available node variables: id, kind, name, file, line, text, external,
+// cyclomatic, cognitive, receiver, params, returns, parent_id,
+// callee_ids, caller_ids, child_ids.
+//
+// Available edge variables: from, to, kind.
+package query
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"github.com/google/cel-go/cel"
+	"github.com/matt/azstral/graph"
+)
+
+// NodeQuery evaluates a CEL expression against every node in the graph,
+// returning all nodes for which the expression is true.
+func NodeQuery(g *graph.Graph, expr string) ([]*graph.Node, error) {
+	callerIndex := buildCallerIndex(g)
+
+	env, err := nodeEnv()
+	if err != nil {
+		return nil, err
+	}
+
+	prg, err := compile(env, expr)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []*graph.Node
+	for _, n := range g.Nodes {
+		act := nodeActivation(g, n, callerIndex)
+		out, _, evalErr := prg.Eval(act)
+		if evalErr != nil {
+			continue
+		}
+		if b, ok := out.Value().(bool); ok && b {
+			results = append(results, n)
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].File != results[j].File {
+			return results[i].File < results[j].File
+		}
+		return results[i].Line < results[j].Line
+	})
+	return results, nil
+}
+
+// EdgeQuery evaluates a CEL expression against every edge in the graph.
+func EdgeQuery(g *graph.Graph, expr string) ([]*graph.Edge, error) {
+	env, err := edgeEnv()
+	if err != nil {
+		return nil, err
+	}
+
+	prg, err := compile(env, expr)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []*graph.Edge
+	for _, e := range g.Edges {
+		out, _, evalErr := prg.Eval(map[string]any{
+			"from": e.From,
+			"to":   e.To,
+			"kind": string(e.Kind),
+		})
+		if evalErr != nil {
+			continue
+		}
+		if b, ok := out.Value().(bool); ok && b {
+			results = append(results, e)
+		}
+	}
+	return results, nil
+}
+
+// nodeEnv builds the CEL environment for node queries.
+func nodeEnv() (*cel.Env, error) {
+	env, err := cel.NewEnv(
+		cel.Variable("id", cel.StringType),
+		cel.Variable("kind", cel.StringType),
+		cel.Variable("name", cel.StringType),
+		cel.Variable("file", cel.StringType),
+		cel.Variable("line", cel.IntType),
+		cel.Variable("text", cel.StringType),
+		cel.Variable("external", cel.BoolType),
+		cel.Variable("cyclomatic", cel.IntType),
+		cel.Variable("cognitive", cel.IntType),
+		cel.Variable("receiver", cel.StringType),
+		cel.Variable("params", cel.StringType),
+		cel.Variable("returns", cel.StringType),
+		cel.Variable("parent_id", cel.StringType),
+		cel.Variable("callee_ids", cel.ListType(cel.StringType)),
+		cel.Variable("caller_ids", cel.ListType(cel.StringType)),
+		cel.Variable("child_ids", cel.ListType(cel.StringType)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("node env: %w", err)
+	}
+	return env, nil
+}
+
+// edgeEnv builds the CEL environment for edge queries.
+func edgeEnv() (*cel.Env, error) {
+	env, err := cel.NewEnv(
+		cel.Variable("from", cel.StringType),
+		cel.Variable("to", cel.StringType),
+		cel.Variable("kind", cel.StringType),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("edge env: %w", err)
+	}
+	return env, nil
+}
+
+func compile(env *cel.Env, expr string) (cel.Program, error) {
+	ast, issues := env.Compile(expr)
+	if issues != nil && issues.Err() != nil {
+		return nil, fmt.Errorf("compile: %w", issues.Err())
+	}
+	prg, err := env.Program(ast)
+	if err != nil {
+		return nil, fmt.Errorf("program: %w", err)
+	}
+	return prg, nil
+}
+
+// nodeActivation builds the CEL activation map for a node.
+func nodeActivation(g *graph.Graph, n *graph.Node, callerIndex map[string][]string) map[string]any {
+	parentID := ""
+	for _, e := range g.EdgesTo(n.ID) {
+		if e.Kind == graph.EdgeContains {
+			parentID = e.From
+			break
+		}
+	}
+
+	childIDs := []string{}
+	for _, e := range g.EdgesFrom(n.ID) {
+		if e.Kind == graph.EdgeContains {
+			childIDs = append(childIDs, e.To)
+		}
+	}
+
+	// Callees: walk function → call nodes → callee edges.
+	calleeIDs := []string{}
+	if n.Kind == graph.KindFunction {
+		for _, e := range g.EdgesFrom(n.ID) {
+			if e.Kind != graph.EdgeContains {
+				continue
+			}
+			callNode, ok := g.GetNode(e.To)
+			if !ok || callNode.Kind != graph.KindCall {
+				continue
+			}
+			for _, ce := range g.EdgesFrom(callNode.ID) {
+				if ce.Kind == graph.EdgeCallee {
+					calleeIDs = append(calleeIDs, ce.To)
+				}
+			}
+		}
+	}
+
+	callerIDs := callerIndex[n.ID]
+	if callerIDs == nil {
+		callerIDs = []string{}
+	}
+
+	return map[string]any{
+		"id":         n.ID,
+		"kind":       string(n.Kind),
+		"name":       n.Name,
+		"file":       n.File,
+		"line":       int64(n.Line),
+		"text":       n.Text,
+		"external":   n.Metadata["external"] == "true",
+		"cyclomatic": metaInt(n, "cyclomatic"),
+		"cognitive":  metaInt(n, "cognitive"),
+		"receiver":   n.Metadata["receiver"],
+		"params":     n.Metadata["params"],
+		"returns":    n.Metadata["returns"],
+		"parent_id":  parentID,
+		"callee_ids": calleeIDs,
+		"caller_ids": callerIDs,
+		"child_ids":  childIDs,
+	}
+}
+
+// buildCallerIndex builds a reverse map: callee node ID → []caller function IDs.
+func buildCallerIndex(g *graph.Graph) map[string][]string {
+	index := make(map[string][]string)
+	for _, n := range g.Nodes {
+		if n.Kind != graph.KindFunction {
+			continue
+		}
+		for _, e := range g.EdgesFrom(n.ID) {
+			if e.Kind != graph.EdgeContains {
+				continue
+			}
+			callNode, ok := g.GetNode(e.To)
+			if !ok || callNode.Kind != graph.KindCall {
+				continue
+			}
+			for _, ce := range g.EdgesFrom(callNode.ID) {
+				if ce.Kind == graph.EdgeCallee {
+					index[ce.To] = append(index[ce.To], n.ID)
+				}
+			}
+		}
+	}
+	return index
+}
+
+func metaInt(n *graph.Node, key string) int64 {
+	v, _ := strconv.ParseInt(n.Metadata[key], 10, 64)
+	return v
+}
+
+// Help is the query language documentation returned by the query_help tool.
+const Help = `# CEL Graph Query Language
+
+## Node query variables
+
+  id          string  unique node ID (e.g. "func:ParseFile", "type:Config")
+  kind        string  function | type | variable | package | file | import | comment
+  name        string  symbol name
+  file        string  source file path as node ID ("file:/abs/path/to/file.go")
+  line        int     start line number
+  text        string  function body or type definition text
+  external    bool    true if from an external/vendor package
+  cyclomatic  int     cyclomatic complexity (functions only)
+  cognitive   int     cognitive complexity (functions only)
+  receiver    string  method receiver (e.g. "r *Reader")
+  params      string  parameter list text
+  returns     string  return type text
+  parent_id   string  ID of the containing node (package, file, etc.)
+  callee_ids  list    IDs of functions this node calls
+  caller_ids  list    IDs of functions that call this node
+  child_ids   list    IDs of direct children
+
+## Edge query variables
+
+  from   string  source node ID
+  to     string  target node ID
+  kind   string  contains | calls | callee | references | annotates | covers
+
+## CEL operators and methods
+
+  ==  !=  <  <=  >  >=        comparison
+  &&  ||  !                    boolean logic
+  in                           list membership:  "func:X" in callee_ids
+  .contains(s)                 substring:        name.contains("Parse")
+  .startsWith(s)               prefix:           name.startsWith("Test")
+  .endsWith(s)                 suffix:           file.endsWith("_test.go")
+  .matches(re)                 regex:            name.matches("^[A-Z]")
+  .size()                      length:           callee_ids.size() > 3
+
+## Examples
+
+  # High-complexity functions
+  kind == "function" && cyclomatic > 15
+
+  # Functions that call a specific target
+  kind == "function" && "func:ParseFile" in callee_ids
+
+  # Functions called by main
+  kind == "function" && "func:main" in caller_ids
+
+  # Exported, non-vendor functions with high cognitive load
+  kind == "function" && name.matches("^[A-Z]") && !external && cognitive > 10
+
+  # Methods on a specific type
+  kind == "function" && receiver.contains("Arena")
+
+  # Functions returning error
+  kind == "function" && returns.contains("error")
+
+  # Test functions
+  kind == "function" && name.startsWith("Test")
+
+  # Types in a specific package
+  kind == "type" && parent_id == "pkg:parser"
+
+  # High-fan-out functions (calls many things)
+  kind == "function" && callee_ids.size() > 8
+
+  # Hot functions (called by many callers)
+  kind == "function" && caller_ids.size() > 5
+
+  # All callee edges into a specific function (edge query)
+  to == "func:ParseFile" && kind == "callee"
+
+  # All edges from a package (edge query)
+  from.startsWith("pkg:") && kind == "contains"
+`
