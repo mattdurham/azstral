@@ -36,10 +36,12 @@ func main() {
 	// code.
 	_, err = exec.Command("date", "-x").Output()
 	if err != nil {
-		if e, ok := errors.AsType[*exec.Error](err); ok {
-			fmt.Println("failed executing:", e)
-		} else if e, ok := errors.AsType[*exec.ExitError](err); ok {
-			exitCode := e.ExitCode()
+		var execErr *exec.Error
+		var exitErr *exec.ExitError
+		if errors.As(err, &execErr) {
+			fmt.Println("failed executing:", execErr)
+		} else if errors.As(err, &exitErr) {
+			exitCode := exitErr.ExitCode()
 			fmt.Println("command exit rc =", exitCode)
 		} else {
 			panic(err)
