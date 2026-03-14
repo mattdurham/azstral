@@ -402,7 +402,8 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 		Description: "Encode the graph in Compact Code Graph Format (CCGF). " +
 			"Returns a compact, line-based representation of program structure " +
 			"with typed nodes, typed edges, and optional attributes. " +
-			"Much smaller than JSON for LLM consumption.",
+			"Much smaller than JSON for LLM consumption. " +
+			"Call ccgf_grammar first if you need the format definition.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input ccgfInput) (*mcp.CallToolResult, any, error) {
 		opts := ccgf.Options{
 			Scope:  input.Scope,
@@ -416,5 +417,30 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 			opts.Vendor = ccgf.VendorSurface
 		}
 		return toolText(ccgf.Encode(g, opts)), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ccgf_grammar",
+		Description: "Return the CCGF format grammar definition. Call this before encode_ccgf if you need to understand the output format.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		return toolText(ccgf.Grammar), nil, nil
+	})
+
+	type deadcodeInput struct {
+		IncludeExported bool `json:"include_exported,omitempty" jsonschema:"report exported symbols in non-main packages as dead (default: false, since they may be used externally)"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "find_deadcode",
+		Description: "Find dead code — symbols that are defined but never referenced. " +
+			"Excludes main(), init(), Test*/Benchmark*/Example* functions. " +
+			"By default, exported symbols in non-main packages are excluded " +
+			"(they may be used by external consumers).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input deadcodeInput) (*mcp.CallToolResult, any, error) {
+		dead := ccgf.FindDeadCode(g, input.IncludeExported)
+		if len(dead) == 0 {
+			return toolText("no dead code found"), nil, nil
+		}
+		return toolJSON(dead), nil, nil
 	})
 }
