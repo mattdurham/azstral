@@ -239,6 +239,105 @@ func metaFloat64(n *graph.Node, key string) float64 {
 }
 
 // Help is the query language documentation returned by the query_help tool.
+// Examples is a curated set of ready-to-use queries grouped by use case.
+const Examples = `# Query Examples
+
+## Complexity
+
+  # High cyclomatic complexity
+  kind == "function" && cyclomatic > 15
+
+  # High cognitive complexity (hardest to understand)
+  kind == "function" && cognitive > 20
+
+  # Both — highest refactoring risk
+  kind == "function" && cyclomatic > 10 && cognitive > 15
+
+  # Complex methods on a specific type
+  kind == "function" && receiver.contains("Executor") && cyclomatic > 5
+
+## Call graph
+
+  # Functions called by many callers (hot paths)
+  kind == "function" && caller_ids.size() > 5
+
+  # Functions that call many other functions (coordinators)
+  kind == "function" && callee_ids.size() > 8
+
+  # Who calls a specific function
+  kind == "function" && "func:ParseFile" in callee_ids
+
+  # What calls a specific function
+  kind == "function" && "func:main" in caller_ids
+
+## Coverage (requires run_tests)
+
+  # Zero coverage
+  kind == "function" && test_status == "untested"
+
+  # Low coverage
+  kind == "function" && coverage < 50.0
+
+  # Failing tests
+  test_status == "fail"
+
+  # High-risk: complex, heavily-used, no tests
+  kind == "function" && cyclomatic > 10 && caller_ids.size() > 3 && test_status == "untested"
+
+## Allocations (requires run_escape)
+
+  # Functions that cause heap allocations
+  kind == "function" && heap_allocs > 0
+
+  # Allocation-heavy functions
+  kind == "function" && heap_allocs > 5
+
+  # Hot allocation paths: heavy callers + heap allocs
+  kind == "function" && heap_allocs > 3 && caller_ids.size() > 3
+
+  # All risk factors combined
+  kind == "function" && heap_allocs > 3 && cyclomatic > 10 && test_status == "untested"
+
+## Structure
+
+  # Exported functions (library API surface)
+  kind == "function" && name.matches("^[A-Z]") && !external
+
+  # Methods on a type
+  kind == "function" && receiver.contains("Graph")
+
+  # Functions returning error
+  kind == "function" && returns.contains("error")
+
+  # Test functions
+  kind == "function" && name.startsWith("Test")
+
+  # Functions in a specific file
+  kind == "function" && file.contains("executor")
+
+  # Types in a package
+  kind == "type" && parent_id == "pkg:executor"
+
+  # All symbols in a package
+  parent_id == "pkg:parser" && !external
+
+## Vendor
+
+  # External/vendor symbols referenced
+  kind == "function" && external == true
+
+  # Non-vendor functions that call into a vendor package
+  kind == "function" && !external && "func:fmt.Println" in callee_ids
+
+## Edge queries
+
+  # All callee edges into a function
+  to == "func:ParseFile" && kind == "callee"
+
+  # All symbols a package defines
+  from == "pkg:graph" && kind == "contains"
+`
+
 // Help is the query language documentation.
 const Help = `# CEL Graph Query Language
 

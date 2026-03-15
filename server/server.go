@@ -897,6 +897,13 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 		return toolText(query.Help), nil, nil
 	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "query_examples",
+		Description: "Return ready-to-use query examples grouped by use case: complexity, call graph, coverage, allocations, structure, vendor, edges.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		return toolText(query.Examples), nil, nil
+	})
 }
 
 // --- Test and coverage tools ---
