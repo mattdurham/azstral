@@ -76,6 +76,9 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addNode(id, graph.KindFor, "", map[string]string{
 			"cond": cond, "init": init, "post": post, "src": header,
 		})
+		if s.Cond != nil {
+			addExpr(g, fset, src, id, fileID, s.Cond)
+		}
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
 		}
@@ -102,6 +105,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		}
 		meta["src"] = header
 		addNode(id, graph.KindFor, "", meta)
+		addExpr(g, fset, src, id, fileID, s.X)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
 		}
@@ -127,6 +131,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			meta["else_line"] = fmt.Sprintf("%d", elsePos.Line)
 		}
 		addNode(id, graph.KindIf, "", meta)
+		addExpr(g, fset, src, id, fileID, s.Cond)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
 		}
@@ -197,6 +202,9 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			"values": strings.Join(valueTexts, ", "),
 			"src":    retSrc,
 		})
+		for _, v := range s.Results {
+			addExpr(g, fset, src, id, fileID, v)
+		}
 
 	case *ast.DeferStmt:
 		id := stmtID("defer")
@@ -224,6 +232,13 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			"rhs": strings.Join(rhsParts, ", "),
 			"src": assignSrc,
 		})
+		// Wire expression nodes for lhs and rhs.
+		for _, l := range s.Lhs {
+			addExpr(g, fset, src, id, fileID, l)
+		}
+		for _, r := range s.Rhs {
+			addExpr(g, fset, src, id, fileID, r)
+		}
 
 	case *ast.SendStmt:
 		id := stmtID("send")
@@ -234,6 +249,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			"val": val,
 			"src": ch + " <- " + val,
 		})
+		addExpr(g, fset, src, id, fileID, s.Value)
 
 	case *ast.BranchStmt:
 		id := stmtID("branch")
@@ -388,6 +404,222 @@ func addCaseClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 	})
 	_ = g.AddEdge(parentID, id, graph.EdgeContains)
 	walkStatements(g, fset, src, id, fileID, cc.Body)
+}
+
+// exprKindCode returns a short string that disambiguates expression types that
+// share the same start position (e.g. BinaryExpr and its LHS child).
+func exprKindCode(expr ast.Expr) string {
+	switch expr.(type) {
+	case *ast.BinaryExpr:
+		return "bin"
+	case *ast.UnaryExpr:
+		return "unary"
+	case *ast.Ident:
+		return "ident"
+	case *ast.SelectorExpr:
+		return "sel"
+	case *ast.IndexExpr:
+		return "idx"
+	case *ast.BasicLit:
+		return "lit"
+	case *ast.CompositeLit:
+		return "comp"
+	case *ast.TypeAssertExpr:
+		return "ta"
+	case *ast.FuncLit:
+		return "func"
+	default:
+		return "x"
+	}
+}
+
+// addExpr creates a KindExpr* node for the given expression and adds an
+// EdgeContains from parentID to it. Recurses into sub-expressions where
+// appropriate. Call expressions are skipped — KindCall nodes are created
+// by the separate addCallNode pass that runs before walkStatements.
+// ParenExpr is transparent: recurse through it without creating a node.
+// FuncLit, CompositeLit, and TypeAssertExpr are leaves: store src text only.
+func addExpr(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID string, expr ast.Expr) {
+	if expr == nil {
+		return
+	}
+
+	// exprID builds the node ID from position and kind.
+	// We include a kind shortcode because a BinaryExpr and its LHS child
+	// share the same Pos() (both start at the first token), so position
+	// alone is not unique across expression types.
+	pos := fset.Position(expr.Pos())
+	kindCode := exprKindCode(expr)
+	exprID := fmt.Sprintf("expr:%s:%s:%d:%d", kindCode, fileID, pos.Line, pos.Column)
+	exprSrc := extractText(fset, src, expr.Pos(), expr.End())
+
+	switch e := expr.(type) {
+
+	case *ast.ParenExpr:
+		// Transparent: pass parent through, no node created.
+		addExpr(g, fset, src, parentID, fileID, e.X)
+		return
+
+	case *ast.CallExpr:
+		// Skip: handled by addCallNode which runs before walkStatements.
+		// The KindCall node already exists; we do not create a duplicate.
+		return
+
+	case *ast.BinaryExpr:
+		lhsSrc := extractText(fset, src, e.X.Pos(), e.X.End())
+		rhsSrc := extractText(fset, src, e.Y.Pos(), e.Y.End())
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprBinary,
+			Name:    string(graph.KindExprBinary),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"op":      e.Op.String(),
+				"src":     exprSrc,
+				"lhs_src": lhsSrc,
+				"rhs_src": rhsSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		addExpr(g, fset, src, exprID, fileID, e.X)
+		addExpr(g, fset, src, exprID, fileID, e.Y)
+
+	case *ast.UnaryExpr:
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprUnary,
+			Name:    string(graph.KindExprUnary),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"op":  e.Op.String(),
+				"src": exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		addExpr(g, fset, src, exprID, fileID, e.X)
+
+	case *ast.Ident:
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprIdent,
+			Name:    e.Name,
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"name": e.Name,
+				"src":  exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		// Leaf: no children.
+
+	case *ast.SelectorExpr:
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprSelector,
+			Name:    e.Sel.Name,
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"name": e.Sel.Name,
+				"src":  exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		// Recurse into the left-hand expression (e.g. "os" in "os.Stderr").
+		addExpr(g, fset, src, exprID, fileID, e.X)
+
+	case *ast.IndexExpr:
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprIndex,
+			Name:    string(graph.KindExprIndex),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"src": exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		addExpr(g, fset, src, exprID, fileID, e.X)
+		addExpr(g, fset, src, exprID, fileID, e.Index)
+
+	case *ast.BasicLit:
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprLiteral,
+			Name:    string(graph.KindExprLiteral),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"kind": e.Kind.String(), // token.INT, token.STRING, etc.
+				"src":  exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+		// Leaf: no children.
+
+	case *ast.CompositeLit:
+		// Leaf — do not recurse into composite literal elements (too verbose).
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprComposite,
+			Name:    string(graph.KindExprComposite),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"src": exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+
+	case *ast.TypeAssertExpr:
+		// Leaf — store the full expression text.
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprTypeAssert,
+			Name:    string(graph.KindExprTypeAssert),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"src": exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+
+	case *ast.FuncLit:
+		// Leaf — do NOT recurse into the body. Closure bodies are handled by
+		// addClosureOrLeaf for defer/go statements. Walking here would
+		// double-walk the body and create duplicate statement children.
+		_ = g.AddNode(&graph.Node{
+			ID:      exprID,
+			Kind:    graph.KindExprFunc,
+			Name:    string(graph.KindExprFunc),
+			File:    fileID,
+			Line:    pos.Line,
+			EndLine: fset.Position(expr.End()).Line,
+			Metadata: map[string]string{
+				"src": exprSrc,
+			},
+		})
+		_ = g.AddEdge(parentID, exprID, graph.EdgeContains)
+
+	default:
+		// Unknown/unhandled expression type — skip silently.
+		// This covers *ast.StarExpr, *ast.KeyValueExpr, *ast.ArrayType,
+		// *ast.MapType, *ast.ChanType, *ast.IndexListExpr (generics), etc.
+		return
+	}
 }
 
 func addCommClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID string, cc *ast.CommClause) {

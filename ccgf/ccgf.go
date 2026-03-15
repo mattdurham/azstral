@@ -170,6 +170,25 @@ func typeCode(n *graph.Node) string {
 		return "C" // Channel send
 	case graph.KindBranch:
 		return "B"
+	// Expression-level node kinds.
+	case graph.KindExprBinary:
+		return "E" // binary Expression
+	case graph.KindExprUnary:
+		return "U" // Unary expression
+	case graph.KindExprIdent:
+		return "N" // Name (identifier)
+	case graph.KindExprSelector:
+		return "Q" // Qualified name (selector)
+	case graph.KindExprIndex:
+		return "K" // indeX (K to avoid clash with X=select)
+	case graph.KindExprLiteral:
+		return "O" // Object literal value
+	case graph.KindExprComposite:
+		return "W" // composite literal (W = struct/map/slice Write)
+	case graph.KindExprTypeAssert:
+		return "T" // Type assertion
+	case graph.KindExprFunc:
+		return "F" // Function literal
 	default:
 		return ""
 	}
@@ -236,6 +255,15 @@ func (e *encoder) collect() {
 		graph.KindAssign,
 		graph.KindSend,
 		graph.KindBranch,
+		graph.KindExprBinary,
+		graph.KindExprUnary,
+		graph.KindExprIdent,
+		graph.KindExprSelector,
+		graph.KindExprIndex,
+		graph.KindExprLiteral,
+		graph.KindExprComposite,
+		graph.KindExprTypeAssert,
+		graph.KindExprFunc,
 	} {
 		all = append(all, e.g.NodesByKind(kind)...)
 	}

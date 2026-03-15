@@ -17,3 +17,19 @@ Verify GET /specs returns all spec identifiers with their coverage (linked code 
 
 ## TEST-006
 Verify /cmd/hello prints "Hello World" to stdout.
+
+## TEST-007
+Parse a Go file containing binary expressions in assignment, if condition,
+for condition, return, and send statements. Verify that:
+- KindExprBinary nodes are created with correct `op`, `src`, `lhs_src`,
+  `rhs_src` metadata.
+- EdgeContains links the statement node to the expression node.
+- Recursive children (KindExprIdent, KindExprLiteral) appear under the binary
+  node.
+- Node IDs follow the `expr:bin:<fileID>:<line>:<col>` format.
+
+## TEST-008
+Parse a Go file containing index expressions (items[0]) and verify
+KindExprIndex nodes are created as children of KindReturn nodes via
+EdgeContains. Verify that the parent statement node's src metadata is
+unchanged (codegen round-trip not affected).
