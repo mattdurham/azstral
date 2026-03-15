@@ -378,6 +378,133 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		}
 		return toolText(msg), nil, nil
 	})
+
+	type renameInput struct {
+		ID      string `json:"id" jsonschema:"node ID of the symbol to rename, e.g. func:ParseFile, type:Config, var:errNotFound"`
+		NewName string `json:"new_name" jsonschema:"new symbol name (not the full ID — just the name part, e.g. ParseGoFile)"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "rename_symbol",
+		Description: "Rename a symbol (function, type, variable) across the entire codebase. " +
+			"Updates the symbol definition, all callers/references in function bodies, " +
+			"and the graph node ID and edges atomically. " +
+			"Supports: functions, methods, types, variables, constants.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input renameInput) (*mcp.CallToolResult, any, error) {
+		if input.ID == "" || input.NewName == "" {
+			return toolError("id and new_name are required"), nil, nil
+		}
+
+		node, ok := g.GetNode(input.ID)
+		if !ok {
+			return toolError(fmt.Sprintf("node %q not found", input.ID)), nil, nil
+		}
+		oldName := node.Name
+
+		if oldName == input.NewName {
+			return toolText("no change — name is already " + input.NewName), nil, nil
+		}
+
+		// Compute the new node ID by replacing the name component.
+		newID := strings.Replace(input.ID, oldName, input.NewName, 1)
+
+		// Find all files that need updating:
+		// - the file containing the symbol definition
+		// - files containing functions that call/reference this symbol
+		filesToUpdate := make(map[string]bool)
+		if node.File != "" {
+			filesToUpdate[strings.TrimPrefix(node.File, "file:")] = true
+		}
+
+		// Walk callee edges pointing TO this node.
+		for _, e := range g.EdgesTo(input.ID) {
+			if e.Kind != graph.EdgeCallee && e.Kind != graph.EdgeReferences {
+				continue
+			}
+			// The source is a call node; find its parent function.
+			for _, pe := range g.EdgesTo(e.From) {
+				if pe.Kind == graph.EdgeContains {
+					caller, ok := g.GetNode(pe.From)
+					if ok && caller.Kind == graph.KindFunction && caller.File != "" {
+						filesToUpdate[strings.TrimPrefix(caller.File, "file:")] = true
+					}
+				}
+			}
+		}
+
+		// Also check functions whose params/returns reference this type by name.
+		if node.Kind == graph.KindType {
+			for _, n := range g.NodesByKind(graph.KindFunction) {
+				if strings.Contains(n.Metadata["params"], oldName) ||
+					strings.Contains(n.Metadata["returns"], oldName) {
+					if n.File != "" {
+						filesToUpdate[strings.TrimPrefix(n.File, "file:")] = true
+					}
+				}
+			}
+		}
+
+		// Rename identifier in every affected file.
+		type fileResult struct {
+			path  string
+			count int
+			err   error
+		}
+		var results []fileResult
+		for path := range filesToUpdate {
+			count, err := edit.RenameIdentifier(path, oldName, input.NewName)
+			results = append(results, fileResult{path, count, err})
+		}
+
+		// Update graph: rename node ID and update edges.
+		if err := g.RenameNode(input.ID, newID, input.NewName); err != nil {
+			return toolError(fmt.Sprintf("graph rename: %v", err)), nil, nil
+		}
+
+		// Also update File field metadata that stored the old name in params/returns.
+		if node.Kind == graph.KindFunction {
+			for _, fn := range g.NodesByKind(graph.KindFunction) {
+				patch := graph.NodePatch{}
+				changed := false
+				if strings.Contains(fn.Metadata["params"], oldName) {
+					newParams := strings.ReplaceAll(fn.Metadata["params"], oldName, input.NewName)
+					patch.Metadata = map[string]string{"params": newParams}
+					changed = true
+				}
+				if strings.Contains(fn.Metadata["returns"], oldName) {
+					newRet := strings.ReplaceAll(fn.Metadata["returns"], oldName, input.NewName)
+					if patch.Metadata == nil {
+						patch.Metadata = map[string]string{}
+					}
+					patch.Metadata["returns"] = newRet
+					changed = true
+				}
+				if changed {
+					_ = g.UpdateNode(fn.ID, patch)
+				}
+			}
+		}
+
+		// Build summary.
+		totalReplacements := 0
+		var errs []string
+		var fileSummary []string
+		for _, r := range results {
+			if r.err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", r.path, r.err))
+			} else {
+				totalReplacements += r.count
+				fileSummary = append(fileSummary, fmt.Sprintf("%s (%d)", r.path, r.count))
+			}
+		}
+
+		msg := fmt.Sprintf("renamed %s → %s: %d replacement(s) across %d file(s)",
+			oldName, input.NewName, totalReplacements, len(filesToUpdate))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
+	})
 }
 
 // --- Spec store tools ---

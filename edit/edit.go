@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sort"
 	"os"
 	"strings"
 )
@@ -82,6 +83,55 @@ func AppendFunction(filePath, name, receiver, params, returns, body string) erro
 
 	out := append(src, []byte(sig.String())...)
 	return os.WriteFile(filePath, out, 0o644)
+}
+
+// RenameIdentifier replaces all occurrences of oldName with newName in a Go
+// source file using go/ast for precision — only actual identifiers are matched,
+// not substrings inside strings or comments. Returns the number of replacements.
+func RenameIdentifier(filePath, oldName, newName string) (int, error) {
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filePath, src, 0)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", filePath, err)
+	}
+
+	// Collect byte offsets of all matching identifiers, sorted in reverse so
+	// replacements don't shift the offsets of subsequent positions.
+	var offsets []int
+	ast.Inspect(f, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if ok && id.Name == oldName {
+			offsets = append(offsets, fset.Position(id.Pos()).Offset)
+		}
+		return true
+	})
+	if len(offsets) == 0 {
+		return 0, nil
+	}
+
+	// Sort descending so each replacement doesn't shift later offsets.
+	sort.Sort(sort.Reverse(sort.IntSlice(offsets)))
+
+	oldBytes := []byte(oldName)
+	newBytes := []byte(newName)
+	out := make([]byte, len(src))
+	copy(out, src)
+	for _, off := range offsets {
+		if off+len(oldBytes) > len(out) {
+			continue
+		}
+		out = append(out[:off], append(newBytes, out[off+len(oldBytes):]...)...)
+	}
+
+	if err := os.WriteFile(filePath, out, 0o644); err != nil {
+		return 0, err
+	}
+	return len(offsets), nil
 }
 
 // findFunc locates a function declaration by name and receiver type.

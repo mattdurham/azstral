@@ -164,6 +164,38 @@ func (g *Graph) Reset() {
 	g.Edges = nil
 }
 
+// RenameNode changes a node's ID and name, and updates all edges that reference
+// the old ID. Returns an error if the old ID doesn't exist or the new ID is
+// already taken.
+func (g *Graph) RenameNode(oldID, newID, newName string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n, ok := g.Nodes[oldID]
+	if !ok {
+		return fmt.Errorf("node %q not found", oldID)
+	}
+	if _, exists := g.Nodes[newID]; exists {
+		return fmt.Errorf("node %q already exists", newID)
+	}
+	// Move to new ID.
+	n.ID = newID
+	if newName != "" {
+		n.Name = newName
+	}
+	g.Nodes[newID] = n
+	delete(g.Nodes, oldID)
+	// Update all edges that reference the old ID.
+	for _, e := range g.Edges {
+		if e.From == oldID {
+			e.From = newID
+		}
+		if e.To == oldID {
+			e.To = newID
+		}
+	}
+	return nil
+}
+
 // RemoveEdge removes a directed edge. Returns error if no matching edge exists.
 func (g *Graph) RemoveEdge(from, to string, kind EdgeKind) error {
 	g.mu.Lock()

@@ -131,6 +131,68 @@ func TestAppendFunction_Method(t *testing.T) {
 	}
 }
 
+func TestRenameIdentifier_Function(t *testing.T) {
+	src := `package main
+
+func OldName() {}
+
+func caller() {
+	OldName()
+	x := OldName
+	_ = x
+}
+`
+	path := writeTmp(t, src)
+	n, err := RenameIdentifier(path, "OldName", "NewName")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 { // definition + 2 usages
+		t.Errorf("expected 3 replacements, got %d", n)
+	}
+	got := readTmp(t, path)
+	if strings.Contains(got, "OldName") {
+		t.Errorf("OldName still present:\n%s", got)
+	}
+	if !strings.Contains(got, "func NewName()") {
+		t.Errorf("definition not renamed:\n%s", got)
+	}
+}
+
+func TestRenameIdentifier_Type(t *testing.T) {
+	src := `package main
+
+type OldType struct{ X int }
+
+func New() OldType       { return OldType{} }
+func Use(t OldType) int { return t.X }
+`
+	path := writeTmp(t, src)
+	n, err := RenameIdentifier(path, "OldType", "NewType")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 4 {
+		t.Errorf("expected at least 4 replacements, got %d", n)
+	}
+	got := readTmp(t, path)
+	if strings.Contains(got, "OldType") {
+		t.Errorf("OldType still present:\n%s", got)
+	}
+}
+
+func TestRenameIdentifier_NoMatch(t *testing.T) {
+	src := "package main\nfunc foo() {}\n"
+	path := writeTmp(t, src)
+	n, err := RenameIdentifier(path, "bar", "baz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 replacements, got %d", n)
+	}
+}
+
 func writeTmp(t *testing.T, src string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.go")
