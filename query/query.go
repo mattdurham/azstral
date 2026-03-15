@@ -356,6 +356,38 @@ const Examples = `# Query Examples
   metadata.num("p99_ns") > 5000.0
   metadata.num("bench_rows_op") > 0.0 && bench_ns_op > 200.0
 
+## Statements (for, if, switch, defer, go, assign, send, return, branch)
+
+  # All range loops
+  kind == "for" && metadata["range"] == "true"
+
+  # Range loops over a specific type/variable
+  kind == "for" && metadata["over"].contains("spans")
+
+  # All error checks (if err != nil pattern)
+  kind == "if" && metadata["cond"].contains("err")
+
+  # All goroutine spawns
+  kind == "go"
+
+  # All defer statements in a specific file
+  kind == "defer" && file.contains("executor")
+
+  # Short variable declarations only
+  kind == "assign" && metadata["op"] == ":="
+
+  # Channel sends
+  kind == "send"
+
+  # Goroutines spawned inside loops (go inside for)
+  kind == "go" && parent_id.startsWith("for:")
+
+  # All breaks/continues
+  kind == "branch"
+
+  # Labelled breaks (complex flow)
+  kind == "branch" && metadata["label"] != ""
+
 ## Allocation hotspots — fast workflow
 
   # Single call: escape analysis + rank + return body text ready for editing
@@ -437,6 +469,18 @@ const Help = `# CEL Graph Query Language
   callee_ids  list    IDs of functions this node calls
   caller_ids  list    IDs of functions that call this node
   child_ids   list    IDs of direct children
+  Statement node kinds (children of functions):
+    for     range/for loop      — metadata: range, key, value, over, cond
+    if      if/else-if          — metadata: cond, has_else
+    switch  switch/type switch  — metadata: tag, type_switch
+    select  select              — (no extra metadata)
+    return  return statement    — metadata: values
+    defer   defer statement     — metadata: call
+    go      goroutine spawn     — metadata: call
+    assign  assignment/:=       — metadata: op, lhs
+    send    channel send        — metadata: ch, val
+    branch  break/continue/goto — metadata: tok, label
+
   metadata     map     full key-value metadata; use .num(key) for numeric lookup
                        e.g. metadata.num("bench_rows_op") > 20.0
   coverage     float   statement coverage % (0-100); 0 if run_tests not called

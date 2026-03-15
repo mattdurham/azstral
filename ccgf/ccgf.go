@@ -149,6 +149,27 @@ func typeCode(n *graph.Node) string {
 			return "c"
 		}
 		return "v"
+	// Statement-level kinds.
+	case graph.KindFor:
+		return "L" // Loop
+	case graph.KindIf:
+		return "I"
+	case graph.KindSwitch:
+		return "S"
+	case graph.KindSelect:
+		return "X"
+	case graph.KindReturn:
+		return "R"
+	case graph.KindDefer:
+		return "D"
+	case graph.KindGo:
+		return "G"
+	case graph.KindAssign:
+		return "A"
+	case graph.KindSend:
+		return "C" // Channel send
+	case graph.KindBranch:
+		return "B"
 	default:
 		return ""
 	}
@@ -205,6 +226,16 @@ func (e *encoder) collect() {
 		graph.KindFunction,
 		graph.KindType,
 		graph.KindVariable,
+		graph.KindFor,
+		graph.KindIf,
+		graph.KindSwitch,
+		graph.KindSelect,
+		graph.KindReturn,
+		graph.KindDefer,
+		graph.KindGo,
+		graph.KindAssign,
+		graph.KindSend,
+		graph.KindBranch,
 	} {
 		all = append(all, e.g.NodesByKind(kind)...)
 	}

@@ -279,6 +279,11 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 			return true
 		})
 	}
+
+	// Walk body for statement-level nodes (for, if, switch, return, defer, go, assign, send).
+	if decl.Body != nil {
+		walkStatements(g, fset, src, funcID, fileID, decl.Body.List)
+	}
 }
 func ParseTree(g *graph.Graph, root string) (int, error) {
 	var count int

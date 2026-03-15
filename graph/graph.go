@@ -24,6 +24,18 @@ const (
 	KindImport    NodeKind = "import"
 	KindStatement NodeKind = "statement"
 
+	// Statement-level node kinds — children of functions and other statements.
+	KindFor    NodeKind = "for"    // for loop or range loop
+	KindIf     NodeKind = "if"     // if / else-if / else
+	KindSwitch NodeKind = "switch" // switch or type switch
+	KindSelect NodeKind = "select" // select statement
+	KindReturn NodeKind = "return" // return statement
+	KindDefer  NodeKind = "defer"  // defer statement
+	KindGo     NodeKind = "go"     // go statement (goroutine)
+	KindAssign NodeKind = "assign" // assignment or short variable declaration
+	KindSend   NodeKind = "send"   // channel send (<-)
+	KindBranch NodeKind = "branch" // break / continue / goto / fallthrough
+
 	// Expression-level node kinds for fine-grained AST representation.
 	KindCall     NodeKind = "call"     // a call expression: fmt.Println(...)
 	KindSelector NodeKind = "selector" // a selector: fmt.Println (pkg + method)
