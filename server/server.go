@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/matt/azstral/ccgf"
@@ -491,7 +492,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		added := 0
 		for _, item := range input.Edges {
 			if err := g.AddEdge(item.From, item.To, graph.EdgeKind(item.Kind)); err != nil {
-				errs = append(errs, fmt.Sprintf("%s→%s: %v", item.From, item.To, err))
+				errs = append(errs, fmt.Sprintf("%s\u2192%s: %v", item.From, item.To, err))
 			} else {
 				added++
 			}
@@ -517,7 +518,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		removed := 0
 		for _, item := range input.Edges {
 			if err := g.RemoveEdge(item.From, item.To, graph.EdgeKind(item.Kind)); err != nil {
-				errs = append(errs, fmt.Sprintf("%s→%s: %v", item.From, item.To, err))
+				errs = append(errs, fmt.Sprintf("%s\u2192%s: %v", item.From, item.To, err))
 			} else {
 				removed++
 			}
@@ -531,15 +532,15 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 
 	type renameInput struct {
 		ID      string `json:"id" jsonschema:"node ID of the symbol to rename, e.g. func:ParseFile, type:Config, var:errNotFound"`
-		NewName string `json:"new_name" jsonschema:"new symbol name (not the full ID — just the name part, e.g. ParseGoFile)"`
+		NewName string `json:"new_name" jsonschema:"new symbol name (not the full ID \u2014 just the name part, e.g. ParseGoFile)"`
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "rename_symbol",
-		Description: "Rename a symbol (function, type, variable) across the entire codebase. " +
+		Description: "Rename a symbol (function, type, variable, or local variable) across the entire codebase. " +
 			"Updates the symbol definition, all callers/references in function bodies, " +
 			"and the graph node ID and edges atomically. " +
-			"Supports: functions, methods, types, variables, constants.",
+			"Supports: functions, methods, types, variables, constants, local variables (KindLocal).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input renameInput) (*mcp.CallToolResult, any, error) {
 		if input.ID == "" || input.NewName == "" {
 			return toolError("id and new_name are required"), nil, nil
@@ -552,7 +553,61 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		oldName := node.Name
 
 		if oldName == input.NewName {
-			return toolText("no change — name is already " + input.NewName), nil, nil
+			return toolText("no change \u2014 name is already " + input.NewName), nil, nil
+		}
+
+		// Special handling for KindLocal (variable dictionary nodes).
+		// Update all referencing statement metadata and regenerate function bodies.
+		if node.Kind == graph.KindLocal {
+			// Collect all statement nodes that reference this local variable.
+			affectedFuncs := make(map[string]bool) // funcID → true
+			for _, e := range g.EdgesTo(input.ID) {
+				if e.Kind != graph.EdgeReferences && e.Kind != graph.EdgeContains {
+					continue
+				}
+				stmtNode, exists := g.GetNode(e.From)
+				if !exists || !isStmtNode(stmtNode.Kind) {
+					continue
+				}
+				// Replace old name in all statement metadata fields.
+				patch := graph.NodePatch{Metadata: map[string]string{}}
+				for _, key := range []string{"src", "lhs", "rhs", "cond", "over", "call", "val", "values"} {
+					if v, ok := stmtNode.Metadata[key]; ok && strings.Contains(v, oldName) {
+						patch.Metadata[key] = replaceWord(v, oldName, input.NewName)
+					}
+				}
+				if len(patch.Metadata) > 0 {
+					_ = g.UpdateNode(stmtNode.ID, patch)
+				}
+				// Track the enclosing function for body regeneration.
+				if funcID, _, _, _, ok := findEnclosingFunc(g, stmtNode.ID); ok {
+					affectedFuncs[funcID] = true
+				}
+			}
+
+			// Regenerate each affected function body on disk.
+			var errs []string
+			for funcID := range affectedFuncs {
+				if _, fp, funcName, receiver, ok := findEnclosingFunc(g, funcID); ok {
+					if body, hasBody := codegen.RenderBody(g, funcID); hasBody {
+						if err := edit.FunctionBody(fp, funcName, receiver, body); err != nil {
+							errs = append(errs, fmt.Sprintf("%s: %v", funcID, err))
+						}
+					}
+				}
+			}
+
+			// Update the variable node's Name and ID.
+			newID := strings.Replace(input.ID, oldName, input.NewName, 1)
+			if err := g.RenameNode(input.ID, newID, input.NewName); err != nil {
+				errs = append(errs, fmt.Sprintf("graph rename: %v", err))
+			}
+
+			msg := fmt.Sprintf("renamed local %s \u2192 %s: updated %d function(s)", oldName, input.NewName, len(affectedFuncs))
+			if len(errs) > 0 {
+				msg += "; errors: " + strings.Join(errs, "; ")
+			}
+			return toolText(msg), nil, nil
 		}
 
 		// Compute the new node ID by replacing the name component.
@@ -598,7 +653,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		// Use precise (type-based) rename if qualified_id is available,
 		// otherwise fall back to name-based rename.
 		qualifiedID := node.Metadata["qualified_id"]
-		pkgDir := node.Metadata["pkg_path"] // import path, not dir — use file dir
+		pkgDir := node.Metadata["pkg_path"] // import path, not dir \u2014 use file dir
 		if node.File != "" {
 			pkgDir = filepath.Dir(strings.TrimPrefix(node.File, "file:"))
 		}
@@ -662,7 +717,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			}
 		}
 
-		msg := fmt.Sprintf("renamed %s → %s: %d replacement(s) across %d file(s)",
+		msg := fmt.Sprintf("renamed %s \u2192 %s: %d replacement(s) across %d file(s)",
 			oldName, input.NewName, totalReplacements, len(filesToUpdate))
 		if len(errs) > 0 {
 			msg += "; errors: " + strings.Join(errs, "; ")
@@ -1499,4 +1554,14 @@ func registerImportTools(srv *mcp.Server, g *graph.Graph) {
 		_ = g.DeleteNode(importID)
 		return toolText(fmt.Sprintf("removed import %q from %s", input.ImportPath, input.FileID)), nil, nil
 	})
+}
+
+func replaceWord(s, oldWord, newWord string) string {
+	// replaceWord replaces oldWord with newWord only when oldWord appears as a
+	// complete identifier (surrounded by non-identifier chars or at boundaries).
+	if oldWord == "" {
+		return s
+	}
+	re := regexp.MustCompile(`(?m)\b` + regexp.QuoteMeta(oldWord) + `\b`)
+	return re.ReplaceAllString(s, newWord)
 }

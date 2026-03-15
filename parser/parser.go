@@ -408,6 +408,42 @@ func addCallNode(g *graph.Graph, fset *token.FileSet, src []byte, ownerID, pkgNa
 		})
 		_ = g.AddEdge(callID, argID, graph.EdgeArg)
 	}
+
+	// Connect the call node to its containing statement node (if one exists).
+	// Walk the function's statement children to find the tightest node by line.
+	fileID := "file:" + strings.TrimPrefix(ownerID, "func:")
+	// ownerID is funcID like "func:pkg.FuncName" — use the file from the func node.
+	if funcNode, ok := g.GetNode(ownerID); ok && funcNode.File != "" {
+		fileID = funcNode.File
+		bestStmtID := ""
+		bestSize := int(^uint(0) >> 1)
+		for _, e := range g.EdgesFrom(ownerID) {
+			if e.Kind != graph.EdgeContains {
+				continue
+			}
+			sn, exists := g.GetNode(e.To)
+			if !exists || sn.Kind == graph.KindCall {
+				continue
+			}
+			if !isStmtLike(sn.Kind) {
+				continue
+			}
+			if sn.Line == 0 || sn.EndLine == 0 {
+				continue
+			}
+			if pos.Line >= sn.Line && pos.Line <= sn.EndLine {
+				size := sn.EndLine - sn.Line
+				if size < bestSize {
+					bestSize = size
+					bestStmtID = sn.ID
+				}
+			}
+		}
+		_ = fileID // suppress unused warning
+		if bestStmtID != "" {
+			_ = g.AddEdge(bestStmtID, callID, graph.EdgeContains)
+		}
+	}
 }
 
 func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName string, decl *ast.GenDecl) {

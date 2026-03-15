@@ -265,6 +265,29 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addNode(id, graph.KindStatement, "", map[string]string{
 			"src": exprSrc,
 		})
+		// Walk the expression for call expressions and link existing call nodes
+		// to this statement via EdgeContains.
+		ast.Inspect(s.X, func(n ast.Node) bool {
+			callExpr, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			callPos := fset.Position(callExpr.Pos())
+			// Call nodes are keyed by owner+index; find by file+line match.
+			for _, e := range g.EdgesFrom(parentID) {
+				if e.Kind != graph.EdgeContains {
+					continue
+				}
+				cn, exists := g.GetNode(e.To)
+				if !exists || cn.Kind != graph.KindCall {
+					continue
+				}
+				if cn.Line == callPos.Line {
+					_ = g.AddEdge(id, cn.ID, graph.EdgeContains)
+				}
+			}
+			return true
+		})
 
 	case *ast.IncDecStmt:
 		id := stmtID("assign")

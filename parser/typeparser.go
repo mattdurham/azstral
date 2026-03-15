@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"os"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -53,12 +54,35 @@ func LoadPackages(g *graph.Graph, dir string) (int, error) {
 				loadErrs = append(loadErrs, fmt.Sprintf("%s: %v", filePath, err))
 				continue
 			}
+			// Walk statements for each FuncDecl so statement nodes exist
+			// when buildVarDictionary runs Phase 2 (use-site lookup).
+			src, readErr := os.ReadFile(filePath)
+			if readErr == nil {
+				fileID := "file:" + filePath
+				for _, decl := range f.Decls {
+					fd, ok := decl.(*ast.FuncDecl)
+					if !ok || fd.Body == nil {
+						continue
+					}
+					// Build the same funcID as addTypedFunc.
+					funcID := ""
+					if fd.Recv != nil && len(fd.Recv.List) > 0 {
+						recvType := types2strT(fd.Recv.List[0].Type)
+						funcID = fmt.Sprintf("func:%s.%s", recvType, fd.Name.Name)
+					} else {
+						funcID = "func:" + fd.Name.Name
+					}
+					walkStatements(g, pkg.Fset, src, funcID, fileID, fd.Body.List)
+				}
+			}
 			fileCount++
 		}
 	}
 
 	// Build the variable dictionary: create nodes for every defined variable,
 	// parameter, and named return, with reference edges from use sites.
+	// Statement nodes are now present, so findContainingNode returns the
+	// tightest enclosing statement rather than just the function.
 	for _, pkg := range pkgs {
 		if pkg.TypesInfo == nil {
 			continue
