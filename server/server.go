@@ -212,17 +212,33 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		if err := g.AddNode(n); err != nil {
 			return toolError(err.Error()), nil, nil
 		}
-		// Sync new function nodes directly to disk — no write_file needed.
-		if n.Kind == graph.KindFunction && n.File != "" && n.Text != "" {
-			filePath := strings.TrimPrefix(n.File, "file:")
-			params := n.Metadata["params"]
-			returns := n.Metadata["returns"]
-			receiver := n.Metadata["receiver"]
-			if err := edit.AppendFunction(filePath, n.Name, receiver, params, returns, n.Text); err != nil {
-				return toolJSON(map[string]any{"id": n.ID, "warning": err.Error()}), nil, nil
+		// Sync to disk based on node kind.
+		switch n.Kind {
+		case graph.KindFile:
+			// Create the physical file with a package declaration.
+			filePath := strings.TrimPrefix(n.ID, "file:")
+			if filePath != n.ID { // only if ID has file: prefix
+				pkg := n.Metadata["package"]
+				if pkg == "" {
+					pkg = filepath.Base(filepath.Dir(filePath))
+				}
+				if err := createGoFile(filePath, pkg); err != nil {
+					return toolJSON(map[string]any{"node": n, "warning": err.Error()}), nil, nil
+				}
+			}
+		case graph.KindFunction:
+			// Append function to its file.
+			if n.File != "" && n.Text != "" {
+				filePath := strings.TrimPrefix(n.File, "file:")
+				params := n.Metadata["params"]
+				returns := n.Metadata["returns"]
+				receiver := n.Metadata["receiver"]
+				if err := edit.AppendFunction(filePath, n.Name, receiver, params, returns, n.Text); err != nil {
+					return toolJSON(map[string]any{"node": n, "warning": err.Error()}), nil, nil
+				}
 			}
 		}
-		return toolText(fmt.Sprintf("added node %s (%s)", n.ID, n.Kind)), nil, nil
+		return toolJSON(n), nil, nil
 	})
 
 	type addNodesInput struct {
@@ -475,35 +491,13 @@ func registerSpecTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "render",
-		Description: "Render a file node from the graph into Go source code. Returns the generated source as text.",
+		Description: "Preview a file node as Go source. Read-only — use add_node/update_node to modify files.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input nodeIDInput) (*mcp.CallToolResult, any, error) {
 		src, err := codegen.RenderFile(g, st, input.ID)
 		if err != nil {
 			return toolError(err.Error()), nil, nil
 		}
 		return toolText(src), nil, nil
-	})
-
-	type writeFileInput struct {
-		FileNodeID string `json:"file_node_id" jsonschema:"file node ID to render, e.g. file:main.go"`
-		OutputPath string `json:"output_path" jsonschema:"path to write the generated Go file"`
-	}
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "write_file",
-		Description: "Render a file node to Go source and write it to disk.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input writeFileInput) (*mcp.CallToolResult, any, error) {
-		src, err := codegen.RenderFile(g, st, input.FileNodeID)
-		if err != nil {
-			return toolError(err.Error()), nil, nil
-		}
-		if err := os.MkdirAll(filepath.Dir(input.OutputPath), 0o755); err != nil {
-			return toolError(fmt.Sprintf("mkdir: %v", err)), nil, nil
-		}
-		if err := os.WriteFile(input.OutputPath, []byte(src), 0o644); err != nil {
-			return toolError(fmt.Sprintf("write: %v", err)), nil, nil
-		}
-		return toolText(fmt.Sprintf("wrote %s (%d bytes)", input.OutputPath, len(src))), nil, nil
 	})
 }
 
@@ -523,6 +517,22 @@ func toolError(msg string) *mcp.CallToolResult {
 		},
 		IsError: true,
 	}
+}
+
+// createGoFile creates a new Go source file with just the package declaration.
+// Only operates on absolute paths — relative paths are ignored to prevent
+// accidental file creation in the server's working directory.
+func createGoFile(path, pkg string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("createGoFile requires absolute path, got %q", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil // already exists — don't overwrite
+	}
+	return os.WriteFile(path, []byte("package "+pkg+"\n"), 0o644)
 }
 
 func toolJSON(v any) *mcp.CallToolResult {
