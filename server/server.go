@@ -157,7 +157,7 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 		if !ok {
 			return toolError(fmt.Sprintf("node %q not found", input.ID)), nil, nil
 		}
-		return toolJSON(node), nil, nil
+		return toolNode(node), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -223,7 +223,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 					pkg = filepath.Base(filepath.Dir(filePath))
 				}
 				if err := createGoFile(filePath, pkg); err != nil {
-					return toolJSON(map[string]any{"node": n, "warning": err.Error()}), nil, nil
+					return toolText(fmt.Sprintf("added %s — warning: %v", n.ID, err)), nil, nil
 				}
 			}
 		case graph.KindFunction:
@@ -234,11 +234,11 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 				returns := n.Metadata["returns"]
 				receiver := n.Metadata["receiver"]
 				if err := edit.AppendFunction(filePath, n.Name, receiver, params, returns, n.Text); err != nil {
-					return toolJSON(map[string]any{"node": n, "warning": err.Error()}), nil, nil
+					return toolText(fmt.Sprintf("added %s — warning: %v", n.ID, err)), nil, nil
 				}
 			}
 		}
-		return toolJSON(n), nil, nil
+		return toolNode(n), nil, nil
 	})
 
 	type addNodesInput struct {
@@ -305,10 +305,10 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			filePath := strings.TrimPrefix(node.File, "file:")
 			if err := edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *input.Text); err != nil {
 				// Non-fatal: graph is updated, file patch failed. Return warning.
-				return toolJSON(map[string]any{"node": node, "warning": err.Error()}), nil, nil
+				return toolText(fmt.Sprintf("updated %s — warning: %v", node.ID, err)), nil, nil
 			}
 		}
-		return toolJSON(node), nil, nil
+		return toolNode(node), nil, nil
 	})
 
 	type addEdgeInput struct {
@@ -502,6 +502,83 @@ func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 }
 
 // --- Helpers ---
+
+// toolNode renders a single graph node as CCGF text using the node's own ID
+// as the symbol identifier. Output uses the same format as encode_ccgf.
+func toolNode(n *graph.Node) *mcp.CallToolResult {
+	if n == nil {
+		return toolError("node is nil")
+	}
+
+	// Map kind to CCGF type code.
+	typeCode := "v"
+	switch n.Kind {
+	case graph.KindPackage:
+		typeCode = "p"
+	case graph.KindFunction:
+		if n.Metadata["receiver"] != "" {
+			typeCode = "m"
+		} else {
+			typeCode = "f"
+		}
+	case graph.KindType:
+		if strings.Contains(n.Text, "interface") {
+			typeCode = "i"
+		} else {
+			typeCode = "t"
+		}
+	case graph.KindVariable:
+		if n.Metadata["const"] == "true" {
+			typeCode = "c"
+		}
+	}
+
+	id := n.ID
+	var b strings.Builder
+	fmt.Fprintf(&b, "s %s %s %s\n", id, typeCode, n.Name)
+
+	// Attributes.
+	if n.File != "" {
+		loc := n.File
+		if n.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", n.File, n.Line)
+		}
+		fmt.Fprintf(&b, "a %s loc %s\n", id, loc)
+	}
+	if sig := buildNodeSig(n); sig != "" {
+		fmt.Fprintf(&b, "a %s sig %s\n", id, sig)
+	}
+	if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
+		fmt.Fprintf(&b, "a %s cyclo %s\n", id, cyc)
+	}
+	if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
+		fmt.Fprintf(&b, "a %s cogn %s\n", id, cog)
+	}
+	if n.Metadata["external"] == "true" {
+		fmt.Fprintf(&b, "a %s ro 1\n", id)
+	}
+
+	return toolText(strings.TrimRight(b.String(), "\n"))
+}
+
+func buildNodeSig(n *graph.Node) string {
+	if n.Kind != graph.KindFunction {
+		return ""
+	}
+	var sig strings.Builder
+	sig.WriteString("func")
+	if recv := n.Metadata["receiver"]; recv != "" {
+		fmt.Fprintf(&sig, "(%s)", recv)
+	}
+	params := n.Metadata["params"]
+	sig.WriteByte('(')
+	sig.WriteString(params)
+	sig.WriteByte(')')
+	if ret := n.Metadata["returns"]; ret != "" {
+		sig.WriteString(ret)
+	}
+	return sig.String()
+}
 func toolText(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
