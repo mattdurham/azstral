@@ -16,6 +16,7 @@ import (
 	"github.com/matt/azstral/graph"
 	"github.com/matt/azstral/parser"
 	"github.com/matt/azstral/query"
+	"github.com/matt/azstral/escape"
 	"github.com/matt/azstral/store"
 	"github.com/matt/azstral/testcov"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -67,6 +68,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerCELTools(srv, g)
 	registerGraphTools(srv, g, root)
 	registerTestTools(srv, g, root)
+	registerEscapeTools(srv, g, root)
 	return srv, nil
 }
 
@@ -945,6 +947,48 @@ func registerTestTools(srv *mcp.Server, g *graph.Graph, root string) {
 		}
 		msg += "\nGraph nodes annotated. Query with: test_status == \"fail\" or coverage < 50"
 		return toolText(msg), nil, nil
+	})
+}
+
+// --- Escape analysis tools ---
+
+func registerEscapeTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type escapeInput struct {
+		Package string `json:"package,omitempty" jsonschema:"package pattern, e.g. './...' or './internal/executor'. Defaults to './...'"`
+		Dir     string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_escape",
+		Description: "Run Go escape analysis (go build -gcflags=-m) and annotate function nodes with allocation counts. " +
+			"After calling this, query_nodes supports: " +
+			"heap_allocs (int) — allocations that escape to heap; " +
+			"stack_allocs (int) — allocations that stay on stack. " +
+			"Example: kind==\"function\" && heap_allocs > 5 — hot allocating functions.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input escapeInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		res, err := escape.Run(g, dir, input.Package)
+		if err != nil {
+			return toolError(fmt.Sprintf("escape analysis: %v", err)), nil, nil
+		}
+
+		return toolText(fmt.Sprintf(
+			"escape analysis: %d total allocations, %d heap (%d%%) — graph nodes annotated with heap_allocs/stack_allocs",
+			res.Total, res.HeapTotal,
+			func() int {
+				if res.Total == 0 {
+					return 0
+				}
+				return res.HeapTotal * 100 / res.Total
+			}(),
+		)), nil, nil
 	})
 }
 
