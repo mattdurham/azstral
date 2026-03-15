@@ -114,6 +114,30 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
 		return toolText(fmt.Sprintf("parsed dir %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
 	})
 
+	type parseFilesInput struct {
+		Paths []string `json:"paths" jsonschema:"array of absolute file paths to parse"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "parse_files",
+		Description: "Parse multiple Go source files in a single call.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input parseFilesInput) (*mcp.CallToolResult, any, error) {
+		var errs []string
+		parsed := 0
+		for _, p := range input.Paths {
+			if err := parser.ParseFile(g, p); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", p, err))
+			} else {
+				parsed++
+			}
+		}
+		msg := fmt.Sprintf("parsed %d/%d files — %d nodes", parsed, len(input.Paths), len(g.Nodes))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
+	})
+
 	desc := "Recursively parse all Go files under a directory tree. Skips vendor, .git, node_modules, and testdata directories."
 	if root != "" {
 		desc += fmt.Sprintf(" Omit path to re-parse the working root (%s).", root)
@@ -158,6 +182,33 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 			return toolError(fmt.Sprintf("node %q not found", input.ID)), nil, nil
 		}
 		return toolNode(node), nil, nil
+	})
+
+	type getNodesInput struct {
+		IDs []string `json:"ids" jsonschema:"array of node IDs to retrieve"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_nodes",
+		Description: "Return multiple graph nodes by ID in a single call. Returns CCGF lines for each found node.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input getNodesInput) (*mcp.CallToolResult, any, error) {
+		var b strings.Builder
+		var missing []string
+		for _, id := range input.IDs {
+			node, ok := g.GetNode(id)
+			if !ok {
+				missing = append(missing, id)
+				continue
+			}
+			// Reuse toolNode's text but concatenate all.
+			r := toolNode(node)
+			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
+			b.WriteString("\n\n")
+		}
+		if len(missing) > 0 {
+			fmt.Fprintf(&b, "not found: %s", strings.Join(missing, ", "))
+		}
+		return toolText(strings.TrimSpace(b.String())), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -309,6 +360,48 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			}
 		}
 		return toolNode(node), nil, nil
+	})
+
+	type updateNodesInput struct {
+		Nodes []updateNodeInput `json:"nodes" jsonschema:"array of node updates to apply"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_nodes",
+		Description: "Update multiple graph nodes in a single call. Each entry uses the same fields as update_node. Returns CCGF lines for each updated node.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input updateNodesInput) (*mcp.CallToolResult, any, error) {
+		var lines []string
+		var errs []string
+		for _, item := range input.Nodes {
+			patch := graph.NodePatch{
+				Name:     item.Name,
+				Text:     item.Text,
+				File:     item.File,
+				Line:     item.Line,
+				EndLine:  item.EndLine,
+				Metadata: item.Metadata,
+			}
+			if err := g.UpdateNode(item.ID, patch); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", item.ID, err))
+				continue
+			}
+			node, _ := g.GetNode(item.ID)
+			if item.Text != nil && node.Kind == graph.KindFunction && node.File != "" {
+				filePath := strings.TrimPrefix(node.File, "file:")
+				if err := edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *item.Text); err != nil {
+					errs = append(errs, fmt.Sprintf("%s (disk): %v", item.ID, err))
+				}
+			}
+			lines = append(lines, fmt.Sprintf("s %s %s", node.ID, node.Name))
+		}
+		out := fmt.Sprintf("updated %d/%d nodes", len(lines), len(input.Nodes))
+		if len(errs) > 0 {
+			out += "; errors: " + strings.Join(errs, "; ")
+		}
+		if len(lines) > 0 {
+			out += "\n" + strings.Join(lines, "\n")
+		}
+		return toolText(out), nil, nil
 	})
 
 	type addEdgeInput struct {
