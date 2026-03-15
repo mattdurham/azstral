@@ -35,6 +35,7 @@ const (
 	KindAssign NodeKind = "assign" // assignment or short variable declaration
 	KindSend   NodeKind = "send"   // channel send (<-)
 	KindBranch NodeKind = "branch" // break / continue / goto / fallthrough
+	KindLocal  NodeKind = "local"  // local variable, parameter, or named return (from go/types)
 
 	// Expression-level node kinds for fine-grained AST representation.
 	KindCall     NodeKind = "call"     // a call expression: fmt.Println(...)

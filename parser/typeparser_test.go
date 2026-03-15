@@ -59,6 +59,48 @@ func TestLoadPackages_Self(t *testing.T) {
 	}
 }
 
+func TestLoadPackages_VarDictionary(t *testing.T) {
+	g := graph.New()
+	_, err := LoadPackages(g, "../graph")
+	if err != nil {
+		t.Logf("warning: %v", err)
+	}
+
+	locals := g.NodesByKind(graph.KindLocal)
+	if len(locals) == 0 {
+		t.Fatal("no local variable nodes created")
+	}
+	t.Logf("created %d local variable nodes", len(locals))
+
+	// Show a sample of what was captured.
+	shown := 0
+	for _, n := range locals {
+		if shown >= 10 {
+			break
+		}
+		t.Logf("  %s  type=%s  scope=%s  file=%s:%d",
+			n.ID, n.Metadata["type"], n.Metadata["scope"],
+			n.Name, n.Line)
+		shown++
+	}
+
+	// Check that reference edges exist.
+	refCount := 0
+	for _, e := range g.Edges {
+		if e.Kind == graph.EdgeReferences {
+			if _, ok := g.GetNode(e.To); ok {
+				if to, _ := g.GetNode(e.To); to != nil && to.Kind == graph.KindLocal {
+					refCount++
+				}
+			}
+		}
+	}
+	t.Logf("reference edges to local vars: %d", refCount)
+	if refCount == 0 {
+		t.Error("no reference edges to local variables found")
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || containsStr(s, sub))
 }
