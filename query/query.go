@@ -14,7 +14,11 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 	"github.com/matt/azstral/graph"
 )
 
@@ -111,6 +115,35 @@ func nodeEnv() (*cel.Env, error) {
 		cel.Variable("bench_allocs_op", cel.DoubleType),
 		cel.Variable("pprof_flat_pct", cel.DoubleType),
 		cel.Variable("pprof_cum_pct", cel.DoubleType),
+		// metadata exposes the full key-value map; use .num(key) for numeric lookup.
+		cel.Variable("metadata", cel.MapType(cel.StringType, cel.StringType)),
+		// num(key) parses metadata[key] as float64, returns 0.0 if missing/non-numeric.
+		cel.Function("num",
+			cel.MemberOverload(
+				"map_num_string",
+				[]*cel.Type{cel.MapType(cel.StringType, cel.StringType), cel.StringType},
+				cel.DoubleType,
+				cel.BinaryBinding(func(mapVal, keyVal ref.Val) ref.Val {
+					idx, ok := mapVal.(traits.Indexer)
+					if !ok {
+						return types.Double(0)
+					}
+					v := idx.Get(keyVal)
+					if types.IsError(v) {
+						return types.Double(0)
+					}
+					s, ok := v.(types.String)
+					if !ok {
+						return types.Double(0)
+					}
+					f, err := strconv.ParseFloat(string(s), 64)
+					if err != nil {
+						return types.Double(0)
+					}
+					return types.Double(f)
+				}),
+			),
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("node env: %w", err)
@@ -210,6 +243,7 @@ func nodeActivation(g *graph.Graph, n *graph.Node, callerIndex map[string][]stri
 		"bench_allocs_op": metaFloat64(n, "bench_allocs_op"),
 		"pprof_flat_pct":  metaFloat64(n, "pprof_flat_pct"),
 		"pprof_cum_pct":   metaFloat64(n, "pprof_cum_pct"),
+		"metadata":        metadataMap(n),
 	}
 }
 
@@ -246,6 +280,15 @@ func metaInt(n *graph.Node, key string) int64 {
 func metaFloat64(n *graph.Node, key string) float64 {
 	v, _ := strconv.ParseFloat(n.Metadata[key], 64)
 	return v
+}
+
+// metadataMap returns the node's metadata as a plain map[string]string
+// for the CEL `metadata` variable. Returns an empty map if nil.
+func metadataMap(n *graph.Node) map[string]string {
+	if n.Metadata == nil {
+		return map[string]string{}
+	}
+	return n.Metadata
 }
 
 // Help is the query language documentation returned by the query_help tool.
@@ -307,6 +350,11 @@ const Examples = `# Query Examples
 
   # Slow AND allocating — optimisation targets
   kind == "function" && bench_ns_op > 500.0 && bench_allocs_op > 2.0
+
+  # Custom metrics via metadata.num(key) — works for any b.ReportMetric field
+  metadata.num("bench_rows_op") > 100.0
+  metadata.num("p99_ns") > 5000.0
+  metadata.num("bench_rows_op") > 0.0 && bench_ns_op > 200.0
 
 ## Allocations (requires run_escape)
 
@@ -383,6 +431,8 @@ const Help = `# CEL Graph Query Language
   callee_ids  list    IDs of functions this node calls
   caller_ids  list    IDs of functions that call this node
   child_ids   list    IDs of direct children
+  metadata     map     full key-value metadata; use .num(key) for numeric lookup
+                       e.g. metadata.num("bench_rows_op") > 20.0
   coverage     float   statement coverage % (0-100); 0 if run_tests not called
   test_status  string  "pass" | "fail" | "covered" | "untested"; "" if not run
   heap_allocs     int     allocations that escape to heap (from run_escape)

@@ -176,6 +176,55 @@ func TestEdgeQuery_To(t *testing.T) {
 	}
 }
 
+func TestNodeQuery_MetadataNum(t *testing.T) {
+	g := buildQueryGraph()
+
+	// Add bench metadata to ParseFile simulating run_bench output.
+	g.UpdateNode("func:ParseFile", graph.NodePatch{
+		Metadata: map[string]string{
+			"bench_ns_op":     "1234.5",
+			"bench_rows_op":   "42",
+			"bench_allocs_op": "3",
+		},
+	})
+
+	// Standard field query.
+	nodes, err := NodeQuery(g, `kind == "function" && bench_ns_op > 1000.0`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "ParseFile" {
+		t.Errorf("bench_ns_op filter: expected ParseFile, got %v", nodes)
+	}
+
+	// Custom metric via metadata.num().
+	nodes, err = NodeQuery(g, `metadata.num("bench_rows_op") > 20.0`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "ParseFile" {
+		t.Errorf("metadata.num filter: expected ParseFile, got %v", nodes)
+	}
+
+	// Combined: slow AND many rows.
+	nodes, err = NodeQuery(g, `metadata.num("bench_rows_op") > 10.0 && bench_ns_op > 500.0`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Errorf("combined filter: expected 1 result, got %d", len(nodes))
+	}
+
+	// Missing key returns 0.0, not an error.
+	nodes, err = NodeQuery(g, `metadata.num("nonexistent") > 0.0`)
+	if err != nil {
+		t.Fatalf("missing key should not error: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Errorf("missing key should return 0, got %d nodes", len(nodes))
+	}
+}
+
 func TestNodeQuery_CompileError(t *testing.T) {
 	g := buildQueryGraph()
 	_, err := NodeQuery(g, `this is not valid cel`)
