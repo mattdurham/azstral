@@ -997,8 +997,12 @@ func registerBenchTools(srv *mcp.Server, g *graph.Graph, root string) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "ran %d benchmarks:\n", len(sum.Results))
 		for _, r := range sum.Results {
-			fmt.Fprintf(&b, "  %-40s %10.0f ns/op  %6.0f B/op  %4.0f allocs/op\n",
+			fmt.Fprintf(&b, "  %-40s %10.0f ns/op  %6.0f B/op  %4.0f allocs/op",
 				r.Name, r.NsPerOp, r.BPerOp, r.AllocsPerOp)
+			for unit, val := range r.Custom {
+				fmt.Fprintf(&b, "  %.4g %s", val, unit)
+			}
+			b.WriteByte('\n')
 		}
 		if len(sum.Failures) > 0 {
 			b.WriteString("failures: ")

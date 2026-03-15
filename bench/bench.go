@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/matt/azstral/graph"
 )
@@ -20,12 +21,27 @@ type Result struct {
 	BPerOp      float64
 	AllocsPerOp float64
 	MBPerSec    float64
+	Custom      map[string]float64 // any non-standard b.ReportMetric fields
 }
 
 // Summary summarises a benchmark run.
 type Summary struct {
 	Results  []*Result
 	Failures []string // packages or benchmarks that failed
+}
+
+// metricKey normalises a benchmark unit string into a metadata key fragment.
+// "rows/op" → "rows_op", "p99-ns" → "p99_ns", "MB/s" → "mb_s"
+func metricKey(unit string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(unit) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
 
 // benchLineRe matches a benchmark result line.
@@ -90,7 +106,7 @@ func parseOutput(data []byte, sum *Summary) {
 		}
 		r.Iterations, _ = strconv.Atoi(m[2])
 
-		// Parse metric pairs: "1234.5 ns/op", "64 B/op", etc.
+		// Parse metric pairs: "1234.5 ns/op", "64 B/op", custom "42 rows/op", etc.
 		for _, mm := range metricRe.FindAllStringSubmatch(m[3], -1) {
 			val, _ := strconv.ParseFloat(mm[1], 64)
 			switch mm[2] {
@@ -102,6 +118,12 @@ func parseOutput(data []byte, sum *Summary) {
 				r.AllocsPerOp = val
 			case "MB/s":
 				r.MBPerSec = val
+			default:
+				// Custom metric from b.ReportMetric(val, "unit").
+				if r.Custom == nil {
+					r.Custom = make(map[string]float64)
+				}
+				r.Custom[mm[2]] = val
 			}
 		}
 
@@ -124,13 +146,17 @@ func annotate(g *graph.Graph, sum *Summary) {
 			continue
 		}
 		meta := map[string]string{
-			"bench_iters":      fmt.Sprintf("%d", r.Iterations),
-			"bench_ns_op":      fmt.Sprintf("%.2f", r.NsPerOp),
-			"bench_b_op":       fmt.Sprintf("%.0f", r.BPerOp),
-			"bench_allocs_op":  fmt.Sprintf("%.0f", r.AllocsPerOp),
+			"bench_iters":     fmt.Sprintf("%d", r.Iterations),
+			"bench_ns_op":     fmt.Sprintf("%.2f", r.NsPerOp),
+			"bench_b_op":      fmt.Sprintf("%.0f", r.BPerOp),
+			"bench_allocs_op": fmt.Sprintf("%.0f", r.AllocsPerOp),
 		}
 		if r.MBPerSec > 0 {
 			meta["bench_mb_s"] = fmt.Sprintf("%.2f", r.MBPerSec)
+		}
+		// Custom metrics from b.ReportMetric — stored as bench_<normalised_unit>.
+		for unit, val := range r.Custom {
+			meta["bench_"+metricKey(unit)] = fmt.Sprintf("%.4g", val)
 		}
 		_ = g.UpdateNode(n.ID, graph.NodePatch{Metadata: meta})
 	}

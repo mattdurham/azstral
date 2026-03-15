@@ -54,6 +54,39 @@ func TestParseOutput_WithCPUSuffix(t *testing.T) {
 	}
 }
 
+func TestParseOutput_CustomMetrics(t *testing.T) {
+	data := []byte(`BenchmarkQuery-8    1000    500 ns/op    42 rows/op    9876 p99-ns    1.5 QPS`)
+	sum := &Summary{}
+	parseOutput(data, sum)
+	if len(sum.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(sum.Results))
+	}
+	r := sum.Results[0]
+	if r.Custom["rows/op"] != 42 {
+		t.Errorf("rows/op = %v, want 42", r.Custom["rows/op"])
+	}
+	if r.Custom["p99-ns"] != 9876 {
+		t.Errorf("p99-ns = %v, want 9876", r.Custom["p99-ns"])
+	}
+	if r.Custom["QPS"] != 1.5 {
+		t.Errorf("QPS = %v, want 1.5", r.Custom["QPS"])
+	}
+}
+
+func TestMetricKey(t *testing.T) {
+	cases := [][2]string{
+		{"rows/op", "rows_op"},
+		{"p99-ns", "p99_ns"},
+		{"MB/s", "mb_s"},
+		{"QPS", "qps"},
+	}
+	for _, c := range cases {
+		if got := metricKey(c[0]); got != c[1] {
+			t.Errorf("metricKey(%q) = %q, want %q", c[0], got, c[1])
+		}
+	}
+}
+
 func TestParseOutput_Failure(t *testing.T) {
 	data := []byte(`FAIL    github.com/foo/bar [build failed]`)
 	sum := &Summary{}
