@@ -88,6 +88,30 @@ type listEdgesInput struct {
 
 // --- Parse tools ---
 func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "parse_packages",
+		Description: "Type-check the Go module and load all packages into the graph. " +
+			"Slower than parse_tree (~seconds) but adds qualified_id metadata to every node, " +
+			"enabling precise cross-package rename via rename_symbol. " +
+			"Requires all module dependencies to be present (go mod download). " +
+			"Resets the graph before loading.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
+		path := input.Path
+		if path == "" {
+			if root == "" {
+				return toolError("path is required (no working root configured)"), nil, nil
+			}
+			path = root
+		}
+		g.Reset()
+		n, err := parser.LoadPackages(g, path)
+		if err != nil {
+			// Partial results may still be useful — return as warning.
+			return toolText(fmt.Sprintf("loaded %d files with errors: %v — %d nodes", n, err, len(g.Nodes))), nil, nil
+		}
+		return toolText(fmt.Sprintf("type-checked %d files — %d nodes (qualified_id available)", n, len(g.Nodes))), nil, nil
+	})
+
 	type parseFilesInput struct {
 		Paths []string `json:"paths" jsonschema:"array of absolute file paths to parse"`
 	}
@@ -445,6 +469,14 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		}
 
 		// Rename identifier in every affected file.
+		// Use precise (type-based) rename if qualified_id is available,
+		// otherwise fall back to name-based rename.
+		qualifiedID := node.Metadata["qualified_id"]
+		pkgDir := node.Metadata["pkg_path"] // import path, not dir — use file dir
+		if node.File != "" {
+			pkgDir = filepath.Dir(strings.TrimPrefix(node.File, "file:"))
+		}
+
 		type fileResult struct {
 			path  string
 			count int
@@ -452,7 +484,13 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		}
 		var results []fileResult
 		for path := range filesToUpdate {
-			count, err := edit.RenameIdentifier(path, oldName, input.NewName)
+			var count int
+			var err error
+			if qualifiedID != "" {
+				count, err = edit.RenameIdentifierPrecise(path, pkgDir, qualifiedID, oldName, input.NewName)
+			} else {
+				count, err = edit.RenameIdentifier(path, oldName, input.NewName)
+			}
 			results = append(results, fileResult{path, count, err})
 		}
 

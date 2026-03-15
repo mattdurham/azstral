@@ -8,7 +8,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"sort"
+
+	"golang.org/x/tools/go/packages"
 	"os"
 	"strings"
 )
@@ -132,6 +135,93 @@ func RenameIdentifier(filePath, oldName, newName string) (int, error) {
 		return 0, err
 	}
 	return len(offsets), nil
+}
+
+// RenameIdentifierPrecise replaces occurrences of oldName in a file, but only
+// those that the type-checker resolves to targetQualifiedID. This prevents
+// false-positive renames when multiple packages define a symbol with the same
+// name. Falls back to RenameIdentifier if type info is unavailable.
+func RenameIdentifierPrecise(filePath, dir, targetQualifiedID, oldName, newName string) (int, error) {
+	cfg := &packages.Config{
+		Mode: packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypes | packages.NeedFiles,
+		Dir:  dir,
+	}
+	pkgs, err := packages.Load(cfg, ".")
+	if err != nil {
+		// Fall back to name-based rename.
+		return RenameIdentifier(filePath, oldName, newName)
+	}
+
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	// Collect offsets of identifiers that resolve to the target.
+	var offsets []int
+	for _, pkg := range pkgs {
+		if pkg.TypesInfo == nil {
+			continue
+		}
+		checkObj := func(id *ast.Ident, obj types.Object) {
+			if id.Name != oldName || obj == nil {
+				return
+			}
+			qid := qualID(obj)
+			if qid != targetQualifiedID {
+				return
+			}
+			pos := pkg.Fset.Position(id.Pos())
+			if pos.Filename == filePath {
+				offsets = append(offsets, pos.Offset)
+			}
+		}
+		for id, obj := range pkg.TypesInfo.Uses {
+			checkObj(id, obj)
+		}
+		for id, obj := range pkg.TypesInfo.Defs {
+			checkObj(id, obj)
+		}
+	}
+
+	if len(offsets) == 0 {
+		return 0, nil
+	}
+
+	sort.Sort(sort.Reverse(sort.IntSlice(offsets)))
+	oldBytes := []byte(oldName)
+	newBytes := []byte(newName)
+	out := make([]byte, len(src))
+	copy(out, src)
+	for _, off := range offsets {
+		if off+len(oldBytes) > len(out) {
+			continue
+		}
+		out = append(out[:off], append(newBytes, out[off+len(oldBytes):]...)...)
+	}
+	if err := os.WriteFile(filePath, out, 0o644); err != nil {
+		return 0, err
+	}
+	return len(offsets), nil
+}
+
+func qualID(obj types.Object) string {
+	if obj == nil || obj.Pkg() == nil {
+		return ""
+	}
+	if fn, ok := obj.(*types.Func); ok {
+		sig := fn.Type().(*types.Signature)
+		if sig.Recv() != nil {
+			recv := sig.Recv().Type().String()
+			// Strip pointer and package path from receiver.
+			recv = strings.TrimLeft(recv, "*")
+			if idx := strings.LastIndex(recv, "."); idx >= 0 {
+				recv = recv[idx+1:]
+			}
+			return obj.Pkg().Path() + ".(" + recv + ")." + obj.Name()
+		}
+	}
+	return obj.Pkg().Path() + "." + obj.Name()
 }
 
 // findFunc locates a function declaration by name and receiver type.
