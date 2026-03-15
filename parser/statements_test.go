@@ -134,10 +134,10 @@ func TestStatementNodes(t *testing.T) {
 		t.Error("no := assignment found")
 	}
 
-	// Containment: range loop should be a child of func:process.
-	funcNode, ok := g.GetNode("func:process")
+	// Containment: range loop should be a child of func:main.process.
+	funcNode, ok := g.GetNode("func:main.process")
 	if !ok {
-		t.Fatal("func:process not found")
+		t.Fatal("func:main.process not found")
 	}
 	children := g.Children(funcNode.ID)
 	var hasFor bool

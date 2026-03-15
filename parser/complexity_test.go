@@ -104,17 +104,17 @@ func complex(x int) int {
 		t.Fatal(err)
 	}
 
-	simpleNode, ok := g.GetNode("func:simple")
+	simpleNode, ok := g.GetNode("func:main.simple")
 	if !ok {
-		t.Fatal("missing func:simple")
+		t.Fatal("missing func:main.simple")
 	}
 	if simpleNode.Metadata["cyclomatic"] != "1" {
 		t.Errorf("simple cyclomatic = %s, want 1", simpleNode.Metadata["cyclomatic"])
 	}
 
-	complexNode, ok := g.GetNode("func:complex")
+	complexNode, ok := g.GetNode("func:main.complex")
 	if !ok {
-		t.Fatal("missing func:complex")
+		t.Fatal("missing func:main.complex")
 	}
 	cyc := complexNode.Metadata["cyclomatic"]
 	if cyc != "4" {

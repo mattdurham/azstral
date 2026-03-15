@@ -330,3 +330,68 @@ func qualName(name, receiver string) string {
 	}
 	return receiver + "." + name
 }
+
+func DeleteFunction(filePath, name, receiver string) error {
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filePath, src, 0)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", filePath, err)
+	}
+
+	target := findFunc(f, name, receiver)
+	if target == nil {
+		return fmt.Errorf("function %s not found in %s", qualName(name, receiver), filePath)
+	}
+
+	start := fset.Position(target.Pos()).Offset
+	end := fset.Position(target.End()).Offset
+
+	// Extend start backward to include any preceding blank line.
+	for start > 0 && src[start-1] == '\n' {
+		start--
+	}
+
+	out := append(src[:start], src[end:]...)
+	return os.WriteFile(filePath, out, 0o644)
+}
+
+func DeleteType(filePath, typeName string) error {
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filePath, src, 0)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", filePath, err)
+	}
+
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			// Use the GenDecl bounds (includes the `type` keyword).
+			start := fset.Position(gd.Pos()).Offset
+			end := fset.Position(gd.End()).Offset
+			// Extend start backward to include any preceding blank line.
+			for start > 0 && src[start-1] == '\n' {
+				start--
+			}
+			out := append(src[:start], src[end:]...)
+			return os.WriteFile(filePath, out, 0o644)
+		}
+	}
+	return fmt.Errorf("type %s not found in %s", typeName, filePath)
+}

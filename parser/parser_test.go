@@ -238,14 +238,14 @@ func (e *argError) Error() string {
 	// The function ID for a pointer receiver "*argError" and method "Error"
 	// should be "func:*argError.Error".
 	methodNode := findNode(fns, func(n *graph.Node) bool {
-		return n.ID == "func:*argError.Error"
+		return n.ID == "func:main.*argError.Error"
 	})
 	if methodNode == nil {
 		ids := make([]string, 0, len(fns))
 		for _, fn := range fns {
 			ids = append(ids, fn.ID)
 		}
-		t.Fatalf("no node with ID 'func:*argError.Error'; found: %v", ids)
+		t.Fatalf("no node with ID 'func:main.*argError.Error'; found: %v", ids)
 	}
 
 	if methodNode.Metadata["receiver"] == "" {
@@ -282,14 +282,14 @@ type element[T any] struct {
 
 	types := g.NodesByKind(graph.KindType)
 	listNode := findNode(types, func(n *graph.Node) bool {
-		return n.ID == "type:List"
+		return n.ID == "type:main.List"
 	})
 	if listNode == nil {
 		ids := make([]string, 0, len(types))
 		for _, ty := range types {
 			ids = append(ids, ty.ID)
 		}
-		t.Fatalf("no node 'type:List'; found: %v", ids)
+		t.Fatalf("no node 'type:main.List'; found: %v", ids)
 	}
 
 	tp := listNode.Metadata["type_params"]
@@ -429,14 +429,14 @@ func helper() string {
 
 	fns := g.NodesByKind(graph.KindFunction)
 	helperNode := findNode(fns, func(n *graph.Node) bool {
-		return n.ID == "func:helper" && n.Metadata["external"] == ""
+		return n.ID == "func:main.helper" && n.Metadata["external"] == ""
 	})
 	if helperNode == nil {
 		ids := make([]string, 0, len(fns))
 		for _, fn := range fns {
 			ids = append(ids, fmt.Sprintf("%s(external=%s)", fn.ID, fn.Metadata["external"]))
 		}
-		t.Fatalf("no local 'func:helper' node; found: %v", ids)
+		t.Fatalf("no local 'func:main.helper' node; found: %v", ids)
 	}
 
 	// The declaration is on line 9 of the source (1-indexed).
@@ -490,30 +490,30 @@ func heavy() {}
 	}
 
 	// Check go:embed on content variable.
-	contentNode, ok := g.GetNode("var:content")
+	contentNode, ok := g.GetNode("var:main.content")
 	if !ok {
-		t.Fatal("missing var:content node")
+		t.Fatal("missing var:main.content node")
 	}
 	if got := contentNode.Metadata["go:embed"]; got != "data.txt" {
-		t.Errorf("var:content go:embed = %q, want %q", got, "data.txt")
+		t.Errorf("var:main.content go:embed = %q, want %q", got, "data.txt")
 	}
 
 	// Check go:embed on assets variable.
-	assetsNode, ok := g.GetNode("var:assets")
+	assetsNode, ok := g.GetNode("var:main.assets")
 	if !ok {
-		t.Fatal("missing var:assets node")
+		t.Fatal("missing var:main.assets node")
 	}
 	if got := assetsNode.Metadata["go:embed"]; got != "assets/*" {
-		t.Errorf("var:assets go:embed = %q, want %q", got, "assets/*")
+		t.Errorf("var:main.assets go:embed = %q, want %q", got, "assets/*")
 	}
 
 	// Check go:noinline on heavy function.
-	heavyNode, ok := g.GetNode("func:heavy")
+	heavyNode, ok := g.GetNode("func:main.heavy")
 	if !ok {
-		t.Fatal("missing func:heavy node")
+		t.Fatal("missing func:main.heavy node")
 	}
 	if got := heavyNode.Metadata["go:noinline"]; got != "true" {
-		t.Errorf("func:heavy go:noinline = %q, want %q", got, "true")
+		t.Errorf("func:main.heavy go:noinline = %q, want %q", got, "true")
 	}
 }
 

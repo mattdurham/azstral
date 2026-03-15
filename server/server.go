@@ -72,6 +72,8 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerEscapeTools(srv, g, root)
 	registerBenchTools(srv, g, root)
 	registerHotspotTools(srv, g, root)
+	registerDeleteTools(srv, g)
+	registerImportTools(srv, g)
 	return srv, nil
 }
 
@@ -238,7 +240,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		Text     string            `json:"text,omitempty" jsonschema:"text content: function body, statement code, comment text, type definition"`
 		File     string            `json:"file,omitempty" jsonschema:"source file path this node belongs to (file: node ID)"`
 		Line     int               `json:"line,omitempty" jsonschema:"line number for ordering within parent"`
-		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"key-value metadata: alias, params, returns, receiver, const, type, package"`
+		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"key-value metadata: alias, params, returns, receiver, const, type, package, insert_after"`
 	}
 
 	syncNodeToDisk := func(n *graph.Node) string {
@@ -266,13 +268,98 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		return ""
 	}
 
+	// insertStmtNode handles the insert_after logic for statement nodes.
+	// It connects the new node into the graph at the right position and
+	// regenerates the enclosing function body on disk.
+	insertStmtNode := func(n *graph.Node) string {
+		insertAfter := n.Metadata["insert_after"]
+		if insertAfter == "" {
+			return ""
+		}
+
+		// Find the parent of the insert_after node (could be a function or another statement).
+		parentID := ""
+		var afterNode *graph.Node
+		afterNode, _ = g.GetNode(insertAfter)
+		if afterNode == nil {
+			return fmt.Sprintf("insert_after node %q not found", insertAfter)
+		}
+
+		// Find the containing parent via EdgeContains.
+		for _, e := range g.EdgesTo(insertAfter) {
+			if e.Kind == graph.EdgeContains {
+				parentID = e.From
+				break
+			}
+		}
+		if parentID == "" {
+			// insert_after is the function itself — attach directly to it.
+			parentID = insertAfter
+		}
+
+		// Compute a line number just after the insert_after node.
+		refLine := afterNode.EndLine
+		if refLine == 0 {
+			refLine = afterNode.Line
+		}
+		if n.Line == 0 {
+			n.Line = refLine + 1
+		}
+
+		// Shift existing sibling lines to make room.
+		children := g.Children(parentID)
+		for _, sibling := range children {
+			if sibling.ID != n.ID && sibling.Line >= n.Line {
+				newLine := sibling.Line + 1
+				newEnd := sibling.EndLine
+				if newEnd > 0 {
+					newEnd = sibling.EndLine + 1
+				}
+				_ = g.UpdateNode(sibling.ID, graph.NodePatch{Line: &newLine, EndLine: &newEnd})
+			}
+		}
+
+		// Connect the node to its parent.
+		_ = g.AddEdge(parentID, n.ID, graph.EdgeContains)
+
+		// Propagate file from parent.
+		if n.File == "" {
+			if parent, ok := g.GetNode(parentID); ok && parent.File != "" {
+				n.File = parent.File
+			}
+		}
+
+		// Regenerate the enclosing function body.
+		funcID, fp, funcName, receiver, ok := findEnclosingFunc(g, n.ID)
+		if !ok {
+			// parentID might itself be the function.
+			if parent, exists := g.GetNode(parentID); exists && parent.Kind == graph.KindFunction {
+				funcID = parentID
+				if parent.File != "" {
+					fp = strings.TrimPrefix(parent.File, "file:")
+				}
+				funcName = parent.Name
+				receiver = parent.Metadata["receiver"]
+				ok = true
+			}
+		}
+		if ok {
+			if body, hasBody := codegen.RenderBody(g, funcID); hasBody {
+				if err := edit.FunctionBody(fp, funcName, receiver, body); err != nil {
+					return err.Error()
+				}
+			}
+		}
+		return ""
+	}
+
 	type addNodesInput struct {
-		Nodes []addNodeInput `json:"nodes" jsonschema:"array of nodes to add. kind=file creates the file on disk; kind=function appends to its file."`
+		Nodes []addNodeInput `json:"nodes" jsonschema:"array of nodes to add. kind=file creates the file on disk; kind=function appends to its file. Statement nodes with insert_after metadata are inserted after the specified node."`
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_nodes",
-		Description: "Add nodes to the code graph. Automatically syncs to disk: file nodes create the .go file, function nodes append to their file.",
+		Description: "Add nodes to the code graph. Automatically syncs to disk: file nodes create the .go file, function nodes append to their file. Statement nodes (for/if/assign/etc.) with an insert_after metadata key are inserted after the specified node ID and the enclosing function body is regenerated.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input addNodesInput) (*mcp.CallToolResult, any, error) {
 		var errs []string
 		added := 0
@@ -290,8 +377,14 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 				errs = append(errs, fmt.Sprintf("%s: %v", item.ID, err))
 				continue
 			}
-			if warn := syncNodeToDisk(n); warn != "" {
-				errs = append(errs, fmt.Sprintf("%s (disk): %s", item.ID, warn))
+			if isStmtNode(n.Kind) && n.Metadata["insert_after"] != "" {
+				if warn := insertStmtNode(n); warn != "" {
+					errs = append(errs, fmt.Sprintf("%s (insert): %s", item.ID, warn))
+				}
+			} else {
+				if warn := syncNodeToDisk(n); warn != "" {
+					errs = append(errs, fmt.Sprintf("%s (disk): %s", item.ID, warn))
+				}
 			}
 			added++
 		}
@@ -336,6 +429,7 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 				continue
 			}
 			node, _ := g.GetNode(item.ID)
+			// Sync text changes to disk.
 			if item.Text != nil && node.File != "" {
 				filePath := strings.TrimPrefix(node.File, "file:")
 				var diskErr error
@@ -344,9 +438,27 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 					diskErr = edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *item.Text)
 				case graph.KindType:
 					diskErr = edit.TypeBody(filePath, node.Name, *item.Text)
+				default:
+					if isStmtNode(node.Kind) {
+						// Statement updated: find enclosing function and regenerate its body.
+						if funcID, fp, funcName, receiver, ok := findEnclosingFunc(g, item.ID); ok {
+							if body, ok := codegen.RenderBody(g, funcID); ok {
+								diskErr = edit.FunctionBody(fp, funcName, receiver, body)
+							}
+						}
+					}
 				}
 				if diskErr != nil {
 					errs = append(errs, fmt.Sprintf("%s (disk): %v", item.ID, diskErr))
+				}
+			} else if item.Metadata != nil && node.File != "" && isStmtNode(node.Kind) {
+				// Metadata-only update on statement node: also regenerate body.
+				if funcID, fp, funcName, receiver, ok := findEnclosingFunc(g, item.ID); ok {
+					if body, ok := codegen.RenderBody(g, funcID); ok {
+						if diskErr := edit.FunctionBody(fp, funcName, receiver, body); diskErr != nil {
+							errs = append(errs, fmt.Sprintf("%s (disk): %v", item.ID, diskErr))
+						}
+					}
 				}
 			}
 			lines = append(lines, fmt.Sprintf("s %s %s", node.ID, node.Name))
@@ -1224,5 +1336,167 @@ func registerGraphTools(srv *mcp.Server, g *graph.Graph, root string) {
 			return toolError(fmt.Sprintf("re-parse error: %v", err)), nil, nil
 		}
 		return toolText(fmt.Sprintf("graph reset — parsed %d files, %d nodes from %s", n, len(g.Nodes), root)), nil, nil
+	})
+}
+
+func registerDeleteTools(srv *mcp.Server, g *graph.Graph) {
+	type deleteNodesInput struct {
+		IDs []string `json:"ids" jsonschema:"array of node IDs to delete"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "delete_nodes",
+		Description: "Delete nodes from the graph and remove all their edges. " +
+			"For function nodes, removes the function declaration from its source file. " +
+			"For type nodes, removes the type declaration from its source file. " +
+			"For statement nodes, regenerates the enclosing function body and patches the file. " +
+			"Returns count deleted and any errors.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input deleteNodesInput) (*mcp.CallToolResult, any, error) {
+		var errs []string
+		deleted := 0
+		for _, id := range input.IDs {
+			node, ok := g.GetNode(id)
+			if !ok {
+				errs = append(errs, fmt.Sprintf("%s: not found", id))
+				continue
+			}
+			switch node.Kind {
+			case graph.KindFunction:
+				if node.File != "" {
+					filePath := strings.TrimPrefix(node.File, "file:")
+					if err := edit.DeleteFunction(filePath, node.Name, node.Metadata["receiver"]); err != nil {
+						errs = append(errs, fmt.Sprintf("%s (disk): %v", id, err))
+					}
+				}
+			case graph.KindType:
+				if node.File != "" {
+					filePath := strings.TrimPrefix(node.File, "file:")
+					if err := edit.DeleteType(filePath, node.Name); err != nil {
+						errs = append(errs, fmt.Sprintf("%s (disk): %v", id, err))
+					}
+				}
+			default:
+				if isStmtNode(node.Kind) {
+					// For statement nodes, find enclosing function and regenerate body.
+					if funcID, filePath, funcName, receiver, ok := findEnclosingFunc(g, id); ok {
+						// Remove the node from graph first so RenderBody excludes it.
+						if err := g.DeleteNode(id); err != nil {
+							errs = append(errs, fmt.Sprintf("%s: %v", id, err))
+							continue
+						}
+						deleted++
+						if body, ok := codegen.RenderBody(g, funcID); ok {
+							if err := edit.FunctionBody(filePath, funcName, receiver, body); err != nil {
+								errs = append(errs, fmt.Sprintf("%s (disk): %v", id, err))
+							}
+						}
+						continue
+					}
+				}
+			}
+			if err := g.DeleteNode(id); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", id, err))
+				continue
+			}
+			deleted++
+		}
+		msg := fmt.Sprintf("deleted %d/%d nodes", deleted, len(input.IDs))
+		if len(errs) > 0 {
+			msg += "; errors: " + strings.Join(errs, "; ")
+		}
+		return toolText(msg), nil, nil
+	})
+}
+
+func isStmtNode(kind graph.NodeKind) bool {
+	switch kind {
+	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect,
+		graph.KindReturn, graph.KindDefer, graph.KindGo, graph.KindAssign,
+		graph.KindSend, graph.KindBranch, graph.KindStatement:
+		return true
+	}
+	return false
+}
+
+func findEnclosingFunc(g *graph.Graph, nodeID string) (funcID, filePath, funcName, receiver string, ok bool) {
+	// Walk EdgesTo with EdgeContains upward until KindFunction.
+	current := nodeID
+	for i := 0; i < 32; i++ {
+		for _, e := range g.EdgesTo(current) {
+			if e.Kind != graph.EdgeContains {
+				continue
+			}
+			parent, exists := g.GetNode(e.From)
+			if !exists {
+				continue
+			}
+			if parent.Kind == graph.KindFunction {
+				filePath := strings.TrimPrefix(parent.File, "file:")
+				return parent.ID, filePath, parent.Name, parent.Metadata["receiver"], true
+			}
+			current = parent.ID
+			break
+		}
+		// No EdgeContains parent found.
+		break
+	}
+	return "", "", "", "", false
+}
+
+func registerImportTools(srv *mcp.Server, g *graph.Graph) {
+	type addImportInput struct {
+		FileID     string `json:"file_id" jsonschema:"file node ID, e.g. file:/path/to/foo.go"`
+		ImportPath string `json:"import_path" jsonschema:"import path to add, e.g. \"fmt\" or \"github.com/foo/bar\""`
+		Alias      string `json:"alias,omitempty" jsonschema:"optional import alias, e.g. myfmt"`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_import",
+		Description: "Add an import to a Go source file and update the graph's import nodes. No-op if the import already exists.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input addImportInput) (*mcp.CallToolResult, any, error) {
+		if input.FileID == "" || input.ImportPath == "" {
+			return toolError("file_id and import_path are required"), nil, nil
+		}
+		filePath := strings.TrimPrefix(input.FileID, "file:")
+		if err := edit.AddImport(filePath, input.ImportPath, input.Alias); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		// Update graph: add import node if not present.
+		importID := fmt.Sprintf("import:%s:%s", input.FileID, input.ImportPath)
+		meta := map[string]string{}
+		if input.Alias != "" {
+			meta["alias"] = input.Alias
+		}
+		_ = g.AddNode(&graph.Node{
+			ID:       importID,
+			Kind:     graph.KindImport,
+			Name:     input.ImportPath,
+			File:     input.FileID,
+			Metadata: meta,
+		})
+		_ = g.AddEdge(input.FileID, importID, graph.EdgeContains)
+		return toolText(fmt.Sprintf("added import %q to %s", input.ImportPath, input.FileID)), nil, nil
+	})
+
+	type removeImportInput struct {
+		FileID     string `json:"file_id" jsonschema:"file node ID, e.g. file:/path/to/foo.go"`
+		ImportPath string `json:"import_path" jsonschema:"import path to remove, e.g. \"fmt\""`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "remove_import",
+		Description: "Remove an import from a Go source file and remove the corresponding import node from the graph.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input removeImportInput) (*mcp.CallToolResult, any, error) {
+		if input.FileID == "" || input.ImportPath == "" {
+			return toolError("file_id and import_path are required"), nil, nil
+		}
+		filePath := strings.TrimPrefix(input.FileID, "file:")
+		if err := edit.RemoveImport(filePath, input.ImportPath); err != nil {
+			return toolError(err.Error()), nil, nil
+		}
+		// Remove import node from graph.
+		importID := fmt.Sprintf("import:%s:%s", input.FileID, input.ImportPath)
+		_ = g.DeleteNode(importID)
+		return toolText(fmt.Sprintf("removed import %q from %s", input.ImportPath, input.FileID)), nil, nil
 	})
 }

@@ -81,10 +81,10 @@ func ParseFile(g *graph.Graph, filePath string) error {
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch decl := n.(type) {
 		case *ast.FuncDecl:
-			addFunction(g, fset, src, fileID, decl)
+			addFunction(g, fset, src, fileID, pkgName, decl)
 			return false // addFunction walks the body itself
 		case *ast.GenDecl:
-			addGenDecl(g, fset, src, fileID, decl)
+			addGenDecl(g, fset, src, fileID, pkgName, decl)
 		}
 		return true
 	})
@@ -92,7 +92,7 @@ func ParseFile(g *graph.Graph, filePath string) error {
 	// Build a map from comment group start position → code node ID using the AST's
 	// own doc-comment associations. This is authoritative: Go's parser links each
 	// doc comment to the declaration it documents.
-	docTarget := buildDocTargetMap(fset, f, fileID)
+	docTarget := buildDocTargetMap(fset, f, fileID, pkgName)
 
 	// Build a set of source ranges covered by function bodies.
 	// Comments inside function bodies are captured in fn.Text and must not be
@@ -100,9 +100,9 @@ func ParseFile(g *graph.Graph, filePath string) error {
 	var bodyRanges []bodyRange
 	for _, decl := range f.Decls {
 		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
-			funcID := "func:" + fd.Name.Name
+			funcID := fmt.Sprintf("func:%s.%s", pkgName, fd.Name.Name)
 			if fd.Recv != nil && len(fd.Recv.List) > 0 {
-				funcID = fmt.Sprintf("func:%s.%s", types2str(fd.Recv.List[0].Type), fd.Name.Name)
+				funcID = fmt.Sprintf("func:%s.%s.%s", pkgName, types2str(fd.Recv.List[0].Type), fd.Name.Name)
 			}
 			bodyRanges = append(bodyRanges, bodyRange{fd.Body.Lbrace, fd.Body.Rbrace, funcID})
 		}
@@ -203,16 +203,16 @@ func ParseDir(g *graph.Graph, dirPath string) error {
 	return nil
 }
 
-func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, decl *ast.FuncDecl) {
+func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName string, decl *ast.FuncDecl) {
 	pos := fset.Position(decl.Pos())
 	endPos := fset.Position(decl.End())
 
-	// Build function ID — include receiver type to avoid collisions with same-named methods.
-	funcID := fmt.Sprintf("func:%s", decl.Name.Name)
+	// Build function ID — include package and receiver type to avoid cross-package collisions.
+	funcID := fmt.Sprintf("func:%s.%s", pkgName, decl.Name.Name)
 	receiver := ""
 	if decl.Recv != nil && len(decl.Recv.List) > 0 {
 		recvTypeName := types2str(decl.Recv.List[0].Type)
-		funcID = fmt.Sprintf("func:%s.%s", recvTypeName, decl.Name.Name)
+		funcID = fmt.Sprintf("func:%s.%s.%s", pkgName, recvTypeName, decl.Name.Name)
 		// Recv FieldList positions include outer parens — strip them.
 		recvText := extractText(fset, src, decl.Recv.Pos(), decl.Recv.End())
 		if len(recvText) >= 2 && recvText[0] == '(' && recvText[len(recvText)-1] == ')' {
@@ -239,6 +239,7 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 	meta := map[string]string{
 		"params":  params,
 		"returns": returns,
+		"package": pkgName,
 	}
 	if receiver != "" {
 		meta["receiver"] = receiver
@@ -262,13 +263,11 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 		Text:     bodyText,
 		Metadata: meta,
 	}); err != nil {
-		// Guard against cross-package name collisions (e.g. two packages both define func:New).
-		// Nodes pre-created by addCallNode have File=="", so only skip if the existing node
-		// has a File set to a different file (confirming it belongs to another package).
+		// Guard against cross-package name collisions.
 		if existing, ok := g.GetNode(funcID); ok && existing.File != "" && existing.File != fileID {
-			return // name claimed by another file — skip to avoid cross-file contamination
+			return // name claimed by another file — skip
 		}
-		// Node pre-created by addCallNode (local call seen before declaration) — update it.
+		// Node pre-created by addCallNode — update it.
 		_ = g.UpdateNode(funcID, graph.NodePatch{
 			Name:     &nameStr,
 			Text:     &bodyText,
@@ -285,7 +284,7 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID string,
 		callIdx := 0
 		ast.Inspect(decl.Body, func(n ast.Node) bool {
 			if callExpr, ok := n.(*ast.CallExpr); ok {
-				addCallNode(g, fset, src, funcID, callExpr, &callIdx)
+				addCallNode(g, fset, src, funcID, pkgName, callExpr, &callIdx)
 			}
 			return true
 		})
@@ -323,7 +322,7 @@ func ParseTree(g *graph.Graph, root string) (int, error) {
 
 // addCallNode creates a KindCall node plus shared symbol nodes for the callee.
 // NOTE-001: fmt.Println(x) → call node referencing shared pkg:fmt and func:fmt.Println nodes.
-func addCallNode(g *graph.Graph, fset *token.FileSet, src []byte, ownerID string, expr *ast.CallExpr, idx *int) {
+func addCallNode(g *graph.Graph, fset *token.FileSet, src []byte, ownerID, pkgName string, expr *ast.CallExpr, idx *int) {
 	pos := fset.Position(expr.Pos())
 	callText := extractText(fset, src, expr.Pos(), expr.End())
 	callID := fmt.Sprintf("call:%s:%d", ownerID, *idx)
@@ -370,7 +369,13 @@ func addCallNode(g *graph.Graph, fset *token.FileSet, src []byte, ownerID string
 
 	case *ast.Ident:
 		// e.g. make(x), len(x), or a local function call.
-		funcNodeID := "func:" + fn.Name
+		// Use package-qualified ID for local calls, bare name for builtins.
+		var funcNodeID string
+		if isBuiltin(fn.Name) {
+			funcNodeID = "func:" + fn.Name
+		} else {
+			funcNodeID = fmt.Sprintf("func:%s.%s", pkgName, fn.Name)
+		}
 		// Create if it doesn't already exist (builtins, local).
 		_ = g.AddNode(&graph.Node{
 			ID:   funcNodeID,
@@ -405,7 +410,7 @@ func addCallNode(g *graph.Graph, fset *token.FileSet, src []byte, ownerID string
 	}
 }
 
-func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, decl *ast.GenDecl) {
+func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName string, decl *ast.GenDecl) {
 	isConst := decl.Tok == token.CONST
 	isVar := decl.Tok == token.VAR
 
@@ -466,9 +471,11 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 		case *ast.TypeSpec:
 			pos := fset.Position(s.Pos())
 			endPos := fset.Position(s.End())
-			typeID := fmt.Sprintf("type:%s", s.Name.Name)
+			typeID := fmt.Sprintf("type:%s.%s", pkgName, s.Name.Name)
 			typeText := extractText(fset, src, s.Type.Pos(), s.Type.End())
-			typeMeta := map[string]string{}
+			typeMeta := map[string]string{
+				"package": pkgName,
+			}
 			if s.TypeParams != nil {
 				typeMeta["type_params"] = extractText(fset, src, s.TypeParams.Pos(), s.TypeParams.End())
 			}
@@ -488,8 +495,80 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 			}
 			_ = g.AddEdge(fileID, typeID, graph.EdgeContains)
 
+			// Add child nodes for struct fields and interface methods.
+			switch t := s.Type.(type) {
+			case *ast.StructType:
+				if t.Fields != nil {
+					for _, field := range t.Fields.List {
+						fieldType := extractText(fset, src, field.Type.Pos(), field.Type.End())
+						for _, name := range field.Names {
+							fieldPos := fset.Position(name.Pos())
+							fieldID := fmt.Sprintf("field:%s.%s.%s", pkgName, s.Name.Name, name.Name)
+							_ = g.AddNode(&graph.Node{
+								ID:   fieldID,
+								Kind: graph.KindVariable,
+								Name: name.Name,
+								File: fileID,
+								Line: fieldPos.Line,
+								Metadata: map[string]string{
+									"field":   "true",
+									"type":    fieldType,
+									"package": pkgName,
+								},
+							})
+							_ = g.AddEdge(typeID, fieldID, graph.EdgeContains)
+						}
+						// Embedded (anonymous) field.
+						if len(field.Names) == 0 {
+							embedName := types2str(field.Type)
+							embedPos := fset.Position(field.Type.Pos())
+							fieldID := fmt.Sprintf("field:%s.%s.%s", pkgName, s.Name.Name, embedName)
+							_ = g.AddNode(&graph.Node{
+								ID:   fieldID,
+								Kind: graph.KindVariable,
+								Name: embedName,
+								File: fileID,
+								Line: embedPos.Line,
+								Metadata: map[string]string{
+									"field":    "true",
+									"embedded": "true",
+									"type":     fieldType,
+									"package":  pkgName,
+								},
+							})
+							_ = g.AddEdge(typeID, fieldID, graph.EdgeContains)
+						}
+					}
+				}
+			case *ast.InterfaceType:
+				if t.Methods != nil {
+					for _, method := range t.Methods.List {
+						for _, name := range method.Names {
+							methodPos := fset.Position(name.Pos())
+							methodSig := extractText(fset, src, method.Type.Pos(), method.Type.End())
+							methodID := fmt.Sprintf("func:%s.%s.%s", pkgName, s.Name.Name, name.Name)
+							_ = g.AddNode(&graph.Node{
+								ID:   methodID,
+								Kind: graph.KindFunction,
+								Name: name.Name,
+								File: fileID,
+								Line: methodPos.Line,
+								Metadata: map[string]string{
+									"interface": s.Name.Name,
+									"sig":       methodSig,
+									"package":   pkgName,
+								},
+							})
+							_ = g.AddEdge(typeID, methodID, graph.EdgeContains)
+						}
+					}
+				}
+			}
+
 		case *ast.ValueSpec:
-			meta := map[string]string{}
+			meta := map[string]string{
+				"package": pkgName,
+			}
 			if isConst {
 				meta["const"] = "true"
 			}
@@ -500,7 +579,7 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID string, 
 			}
 			for i, name := range s.Names {
 				pos := fset.Position(name.Pos())
-				varID := fmt.Sprintf("var:%s", name.Name)
+				varID := fmt.Sprintf("var:%s.%s", pkgName, name.Name)
 				valueText := ""
 				if i < len(s.Values) {
 					valueText = extractText(fset, src, s.Values[i].Pos(), s.Values[i].End())
@@ -592,12 +671,10 @@ func isLiteral(expr ast.Expr) bool {
 
 // buildDocTargetMap builds a map from comment group start position to the graph node ID
 // of the declaration that the comment documents, using the AST's own doc-comment links.
-func buildDocTargetMap(fset *token.FileSet, f *ast.File, fileID string) map[token.Pos]string {
+func buildDocTargetMap(fset *token.FileSet, f *ast.File, fileID, pkgName string) map[token.Pos]string {
 	m := make(map[token.Pos]string)
 
 	// Any comment group that starts before the `package` keyword → the file node.
-	// This covers both attached doc comments (f.Doc) and loose pre-package comments
-	// separated from `package` by a blank line (f.Doc == nil in that case).
 	for _, cg := range f.Comments {
 		if cg.Pos() < f.Package {
 			m[cg.Pos()] = fileID
@@ -609,10 +686,10 @@ func buildDocTargetMap(fset *token.FileSet, f *ast.File, fileID string) map[toke
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			if d.Doc != nil {
-				funcID := "func:" + d.Name.Name
+				funcID := fmt.Sprintf("func:%s.%s", pkgName, d.Name.Name)
 				if d.Recv != nil && len(d.Recv.List) > 0 {
 					recvTypeName := types2str(d.Recv.List[0].Type)
-					funcID = fmt.Sprintf("func:%s.%s", recvTypeName, d.Name.Name)
+					funcID = fmt.Sprintf("func:%s.%s.%s", pkgName, recvTypeName, d.Name.Name)
 				}
 				m[d.Doc.Pos()] = funcID
 			}
@@ -631,10 +708,10 @@ func buildDocTargetMap(fset *token.FileSet, f *ast.File, fileID string) map[toke
 					for _, spec := range d.Specs {
 						switch s := spec.(type) {
 						case *ast.TypeSpec:
-							m[d.Doc.Pos()] = "type:" + s.Name.Name
+							m[d.Doc.Pos()] = fmt.Sprintf("type:%s.%s", pkgName, s.Name.Name)
 						case *ast.ValueSpec:
 							for _, name := range s.Names {
-								m[d.Doc.Pos()] = "var:" + name.Name
+								m[d.Doc.Pos()] = fmt.Sprintf("var:%s.%s", pkgName, name.Name)
 							}
 						}
 					}
@@ -787,4 +864,14 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen] + "..."
 	}
 	return s
+}
+
+func isBuiltin(name string) bool {
+	switch name {
+	case "make", "new", "len", "cap", "append", "copy", "delete", "close",
+		"panic", "recover", "print", "println", "real", "imag", "complex",
+		"min", "max", "clear":
+		return true
+	}
+	return false
 }

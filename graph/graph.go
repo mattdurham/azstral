@@ -286,3 +286,36 @@ func (g *Graph) EdgesTo(id string) []*Edge {
 	}
 	return result
 }
+
+func (g *Graph) DeleteNode(id string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.Nodes[id]; !ok {
+		return fmt.Errorf("node %q not found", id)
+	}
+	delete(g.Nodes, id)
+	// Remove all edges involving this node.
+	n := 0
+	for _, e := range g.Edges {
+		if e.From == id || e.To == id {
+			continue
+		}
+		g.Edges[n] = e
+		n++
+	}
+	g.Edges = g.Edges[:n]
+	return nil
+}
+
+func (g *Graph) DeleteNodes(ids []string) (int, []string) {
+	var errs []string
+	deleted := 0
+	for _, id := range ids {
+		if err := g.DeleteNode(id); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			deleted++
+		}
+	}
+	return deleted, errs
+}
