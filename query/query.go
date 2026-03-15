@@ -106,6 +106,11 @@ func nodeEnv() (*cel.Env, error) {
 		cel.Variable("test_status", cel.StringType),
 		cel.Variable("heap_allocs", cel.IntType),
 		cel.Variable("stack_allocs", cel.IntType),
+		cel.Variable("bench_ns_op", cel.DoubleType),
+		cel.Variable("bench_b_op", cel.DoubleType),
+		cel.Variable("bench_allocs_op", cel.DoubleType),
+		cel.Variable("pprof_flat_pct", cel.DoubleType),
+		cel.Variable("pprof_cum_pct", cel.DoubleType),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("node env: %w", err)
@@ -198,8 +203,13 @@ func nodeActivation(g *graph.Graph, n *graph.Node, callerIndex map[string][]stri
 		"child_ids":   childIDs,
 		"coverage":     metaFloat64(n, "coverage"),
 		"test_status":  n.Metadata["test_status"],
-		"heap_allocs":  metaInt(n, "heap_allocs"),
-		"stack_allocs": metaInt(n, "stack_allocs"),
+		"heap_allocs":     metaInt(n, "heap_allocs"),
+		"stack_allocs":    metaInt(n, "stack_allocs"),
+		"bench_ns_op":     metaFloat64(n, "bench_ns_op"),
+		"bench_b_op":      metaFloat64(n, "bench_b_op"),
+		"bench_allocs_op": metaFloat64(n, "bench_allocs_op"),
+		"pprof_flat_pct":  metaFloat64(n, "pprof_flat_pct"),
+		"pprof_cum_pct":   metaFloat64(n, "pprof_cum_pct"),
 	}
 }
 
@@ -284,6 +294,20 @@ const Examples = `# Query Examples
   # High-risk: complex, heavily-used, no tests
   kind == "function" && cyclomatic > 10 && caller_ids.size() > 3 && test_status == "untested"
 
+## Benchmarks (requires run_bench)
+
+  # Slow benchmarks
+  kind == "function" && bench_ns_op > 1000.0
+
+  # Benchmarks with heap allocations
+  kind == "function" && bench_allocs_op > 0.0
+
+  # Memory-heavy benchmarks
+  kind == "function" && bench_b_op > 1024.0
+
+  # Slow AND allocating — optimisation targets
+  kind == "function" && bench_ns_op > 500.0 && bench_allocs_op > 2.0
+
 ## Allocations (requires run_escape)
 
   # Functions that cause heap allocations
@@ -361,8 +385,11 @@ const Help = `# CEL Graph Query Language
   child_ids   list    IDs of direct children
   coverage     float   statement coverage % (0-100); 0 if run_tests not called
   test_status  string  "pass" | "fail" | "covered" | "untested"; "" if not run
-  heap_allocs  int     allocations that escape to heap (from run_escape)
-  stack_allocs int     allocations that stay on stack (from run_escape)
+  heap_allocs     int     allocations that escape to heap (from run_escape)
+  stack_allocs    int     allocations that stay on stack (from run_escape)
+  bench_ns_op     float   nanoseconds per op (from run_bench)
+  bench_b_op      float   bytes allocated per op (from run_bench)
+  bench_allocs_op float   heap allocations per op (from run_bench)
 
 ## Edge query variables
 

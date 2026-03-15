@@ -16,6 +16,7 @@ import (
 	"github.com/matt/azstral/graph"
 	"github.com/matt/azstral/parser"
 	"github.com/matt/azstral/query"
+	"github.com/matt/azstral/bench"
 	"github.com/matt/azstral/escape"
 	"github.com/matt/azstral/store"
 	"github.com/matt/azstral/testcov"
@@ -69,6 +70,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerGraphTools(srv, g, root)
 	registerTestTools(srv, g, root)
 	registerEscapeTools(srv, g, root)
+	registerBenchTools(srv, g, root)
 	return srv, nil
 }
 
@@ -954,6 +956,109 @@ func registerTestTools(srv *mcp.Server, g *graph.Graph, root string) {
 		}
 		msg += "\nGraph nodes annotated. Query with: test_status == \"fail\" or coverage < 50"
 		return toolText(msg), nil, nil
+	})
+}
+
+// --- Benchmark tools ---
+
+func registerBenchTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type runBenchInput struct {
+		Package string `json:"package,omitempty" jsonschema:"package pattern, e.g. './...' or './internal/executor'. Defaults to './...'"`
+		Bench   string `json:"bench,omitempty" jsonschema:"benchmark name regex, e.g. 'BenchmarkRow' or '.' for all. Defaults to '.'"`
+		Count   int    `json:"count,omitempty" jsonschema:"number of benchmark iterations (-count flag). 1 recommended. Defaults to Go default."`
+		Dir     string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_bench",
+		Description: "Run Go benchmarks and annotate matching Benchmark* function nodes with results. " +
+			"After calling this, query_nodes supports: " +
+			"bench_ns_op (float), bench_b_op (float), bench_allocs_op (float). " +
+			"Example: kind==\"function\" && bench_ns_op > 1000 — slow benchmarks. " +
+			"Example: kind==\"function\" && bench_allocs_op > 0 — benchmarks with allocations.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input runBenchInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		sum, err := bench.Run(g, dir, input.Package, input.Bench, input.Count)
+		if err != nil {
+			return toolError(fmt.Sprintf("benchmark: %v", err)), nil, nil
+		}
+
+		if len(sum.Results) == 0 {
+			return toolText("no benchmark results — check package and bench pattern"), nil, nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "ran %d benchmarks:\n", len(sum.Results))
+		for _, r := range sum.Results {
+			fmt.Fprintf(&b, "  %-40s %10.0f ns/op  %6.0f B/op  %4.0f allocs/op\n",
+				r.Name, r.NsPerOp, r.BPerOp, r.AllocsPerOp)
+		}
+		if len(sum.Failures) > 0 {
+			b.WriteString("failures: ")
+			b.WriteString(strings.Join(sum.Failures, "; "))
+			b.WriteByte('\n')
+		}
+		b.WriteString("Graph nodes annotated. Query with: bench_ns_op > 1000")
+		return toolText(b.String()), nil, nil
+	})
+
+	type runProfileInput struct {
+		Package   string `json:"package,omitempty" jsonschema:"package pattern. Defaults to './...'"`
+		Bench     string `json:"bench,omitempty" jsonschema:"benchmark name regex. Defaults to '.'"`
+		Type      string `json:"type,omitempty" jsonschema:"profile type: cpu (default), mem, block, mutex"`
+		OutputDir string `json:"output_dir,omitempty" jsonschema:"directory to save the .pprof file. Defaults to os.TempDir()"`
+		TopN      int    `json:"top_n,omitempty" jsonschema:"number of top functions to return. Defaults to 20"`
+		Dir       string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_profile",
+		Description: "Run a benchmark with pprof profiling, save the profile to disk, and annotate nodes. " +
+			"Returns the profile file path (pass to 'go tool pprof' for interactive analysis) " +
+			"plus a top-N function breakdown. " +
+			"Annotates nodes with pprof_flat_pct and pprof_cum_pct for CEL queries.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input runProfileInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		profType := bench.ProfileCPU
+		switch strings.ToLower(input.Type) {
+		case "mem", "memory":
+			profType = bench.ProfileMem
+		case "block":
+			profType = bench.ProfileBlock
+		case "mutex":
+			profType = bench.ProfileMutex
+		}
+
+		res, err := bench.RunProfile(g, dir, input.Package, input.Bench, profType, input.OutputDir, input.TopN)
+		if err != nil {
+			return toolError(fmt.Sprintf("profile: %v", err)), nil, nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "profile saved: %s\n", res.Path)
+		fmt.Fprintf(&b, "view interactively: go tool pprof %s\n\n", res.Path)
+		if len(res.TopFuncs) > 0 {
+			fmt.Fprintf(&b, "%-8s %-8s  %s\n", "flat%", "cum%", "function")
+			for _, e := range res.TopFuncs {
+				fmt.Fprintf(&b, "%-8.2f %-8.2f  %s\n", e.FlatPct, e.CumPct, e.Name)
+			}
+		}
+		b.WriteString("\nGraph nodes annotated. Query with: pprof_flat_pct > 5.0")
+		return toolText(b.String()), nil, nil
 	})
 }
 
