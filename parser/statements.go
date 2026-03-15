@@ -56,8 +56,25 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Cond != nil {
 			cond = extractText(fset, src, s.Cond.Pos(), s.Cond.End())
 		}
+		init := ""
+		if s.Init != nil {
+			init = extractText(fset, src, s.Init.Pos(), s.Init.End())
+		}
+		post := ""
+		if s.Post != nil {
+			post = extractText(fset, src, s.Post.Pos(), s.Post.End())
+		}
+		// src = header for codegen reconstruction: "for init; cond; post"
+		header := "for "
+		if init != "" || post != "" {
+			header += init + "; " + cond + "; " + post
+		} else if cond != "" {
+			header += cond
+		} else {
+			header = "for" // bare infinite loop
+		}
 		addNode(id, graph.KindFor, "", map[string]string{
-			"cond": cond,
+			"cond": cond, "init": init, "post": post, "src": header,
 		})
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
@@ -72,7 +89,18 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Value != nil {
 			meta["value"] = extractText(fset, src, s.Value.Pos(), s.Value.End())
 		}
-		meta["over"] = extractText(fset, src, s.X.Pos(), s.X.End())
+		over := extractText(fset, src, s.X.Pos(), s.X.End())
+		meta["over"] = over
+		// src = header for codegen: "for key, value := range over"
+		header := "for "
+		if meta["key"] != "" && meta["value"] != "" {
+			header += meta["key"] + ", " + meta["value"] + " := range " + over
+		} else if meta["key"] != "" {
+			header += meta["key"] + " := range " + over
+		} else {
+			header += "range " + over
+		}
+		meta["src"] = header
 		addNode(id, graph.KindFor, "", meta)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
@@ -81,9 +109,22 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 	case *ast.IfStmt:
 		id := stmtID("if")
 		cond := extractText(fset, src, s.Cond.Pos(), s.Cond.End())
-		meta := map[string]string{"cond": cond}
+		init := ""
+		if s.Init != nil {
+			init = extractText(fset, src, s.Init.Pos(), s.Init.End())
+		}
+		header := "if "
+		if init != "" {
+			header += init + "; " + cond
+		} else {
+			header += cond
+		}
+		meta := map[string]string{"cond": cond, "init": init, "src": header}
 		if s.Else != nil {
 			meta["has_else"] = "true"
+			// Store the line where } else { appears so codegen can partition children.
+			elsePos := fset.Position(s.Body.Rbrace)
+			meta["else_line"] = fmt.Sprintf("%d", elsePos.Line)
 		}
 		addNode(id, graph.KindIf, "", meta)
 		if s.Body != nil {
@@ -99,7 +140,11 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Tag != nil {
 			tag = extractText(fset, src, s.Tag.Pos(), s.Tag.End())
 		}
-		addNode(id, graph.KindSwitch, "", map[string]string{"tag": tag})
+		header := "switch"
+		if tag != "" {
+			header += " " + tag
+		}
+		addNode(id, graph.KindSwitch, "", map[string]string{"tag": tag, "src": header})
 		if s.Body != nil {
 			for _, c := range s.Body.List {
 				if cc, ok := c.(*ast.CaseClause); ok {
@@ -114,6 +159,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addNode(id, graph.KindSwitch, "", map[string]string{
 			"type_switch": "true",
 			"assign":      assign,
+			"src":         "switch " + assign,
 		})
 		if s.Body != nil {
 			for _, c := range s.Body.List {
@@ -125,7 +171,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 
 	case *ast.SelectStmt:
 		id := stmtID("select")
-		addNode(id, graph.KindSelect, "", nil)
+		addNode(id, graph.KindSelect, "", map[string]string{"src": "select"})
 		if s.Body != nil {
 			for _, c := range s.Body.List {
 				if cc, ok := c.(*ast.CommClause); ok {
@@ -140,19 +186,25 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		for _, v := range s.Results {
 			valueTexts = append(valueTexts, extractText(fset, src, v.Pos(), v.End()))
 		}
+		retSrc := "return"
+		if len(valueTexts) > 0 {
+			retSrc += " " + strings.Join(valueTexts, ", ")
+		}
+		// De-indent multiline return values (closures, etc.) to be relative
+		// to the function body, not absolute.
+		retSrc = deindentSrc(retSrc, pos.Column-1)
 		addNode(id, graph.KindReturn, "", map[string]string{
 			"values": strings.Join(valueTexts, ", "),
+			"src":    retSrc,
 		})
 
 	case *ast.DeferStmt:
 		id := stmtID("defer")
-		call := extractText(fset, src, s.Call.Pos(), s.Call.End())
-		addNode(id, graph.KindDefer, "", map[string]string{"call": call})
+		addClosureOrLeaf(g, fset, src, parentID, fileID, id, graph.KindDefer, "defer", s.Call, line, endLine, addNode)
 
 	case *ast.GoStmt:
 		id := stmtID("go")
-		call := extractText(fset, src, s.Call.Pos(), s.Call.End())
-		addNode(id, graph.KindGo, "", map[string]string{"call": call})
+		addClosureOrLeaf(g, fset, src, parentID, fileID, id, graph.KindGo, "go", s.Call, line, endLine, addNode)
 
 	case *ast.AssignStmt:
 		id := stmtID("assign")
@@ -165,10 +217,12 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		for _, r := range s.Rhs {
 			rhsParts = append(rhsParts, extractText(fset, src, r.Pos(), r.End()))
 		}
+		assignSrc := strings.Join(lhsParts, ", ") + " " + op + " " + strings.Join(rhsParts, ", ")
 		addNode(id, graph.KindAssign, "", map[string]string{
 			"op":  op,
 			"lhs": strings.Join(lhsParts, ", "),
 			"rhs": strings.Join(rhsParts, ", "),
+			"src": assignSrc,
 		})
 
 	case *ast.SendStmt:
@@ -178,6 +232,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addNode(id, graph.KindSend, "", map[string]string{
 			"ch":  ch,
 			"val": val,
+			"src": ch + " <- " + val,
 		})
 
 	case *ast.BranchStmt:
@@ -186,9 +241,14 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Label != nil {
 			label = s.Label.Name
 		}
+		branchSrc := s.Tok.String()
+		if label != "" {
+			branchSrc += " " + label
+		}
 		addNode(id, graph.KindBranch, "", map[string]string{
 			"tok":   s.Tok.String(),
 			"label": label,
+			"src":   branchSrc,
 		})
 
 	case *ast.BlockStmt:
@@ -198,22 +258,82 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		}
 
 	case *ast.ExprStmt:
-		// Expression statements (bare function calls, etc.) are already captured
-		// as KindCall nodes by the existing addCallNode walker — skip.
+		// Bare expression statements (function calls, type assertions, etc.)
+		// Store the source for codegen reconstruction.
+		id := stmtID("expr")
+		exprSrc := extractText(fset, src, s.X.Pos(), s.X.End())
+		addNode(id, graph.KindStatement, "", map[string]string{
+			"src": exprSrc,
+		})
 
 	case *ast.IncDecStmt:
 		id := stmtID("assign")
+		lhs := extractText(fset, src, s.X.Pos(), s.X.End())
 		addNode(id, graph.KindAssign, "", map[string]string{
 			"op":  s.Tok.String(),
-			"lhs": extractText(fset, src, s.X.Pos(), s.X.End()),
+			"lhs": lhs,
+			"src": lhs + s.Tok.String(),
 		})
 
 	case *ast.DeclStmt:
-		// var/const/type declarations inside functions.
-		if gd, ok := s.Decl.(*ast.GenDecl); ok {
-			walkStatements(g, fset, src, parentID, fileID, declToStmts(fset, src, gd))
-		}
+		// var/const/type declarations inside functions — store as a statement with src.
+		id := stmtID("decl")
+		declSrc := extractText(fset, src, s.Pos(), s.End())
+		addNode(id, graph.KindStatement, "", map[string]string{
+			"src": declSrc,
+		})
 	}
+}
+
+// deindentSrc strips `tabs` leading tab characters from continuation lines
+// (lines after the first) to convert absolute indentation to relative.
+// The first line is left untouched.
+func deindentSrc(s string, tabs int) string {
+	if tabs <= 0 || !strings.Contains(s, "\n") {
+		return s
+	}
+	prefix := strings.Repeat("\t", tabs)
+	lines := strings.Split(s, "\n")
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.TrimPrefix(lines[i], prefix)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// addClosureOrLeaf handles defer/go statements. If the call contains a FuncLit
+// (closure), the closure body is walked as children and the src stores just the
+// header + closing suffix. Otherwise it's a simple leaf node.
+func addClosureOrLeaf(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID, id string, kind graph.NodeKind, keyword string, call *ast.CallExpr, line, endLine int, addNode func(string, graph.NodeKind, string, map[string]string)) {
+	// Check if the call target is a FuncLit (closure).
+	if fl, ok := call.Fun.(*ast.FuncLit); ok && fl.Body != nil {
+		// Header: "defer func(params) rettype"
+		header := keyword + " " + extractText(fset, src, fl.Pos(), fl.Body.Lbrace)
+		header = strings.TrimRight(header, " {")
+
+		// Closing suffix: "}(args)" — the arguments after the closure body.
+		closeSuffix := "}"
+		if len(call.Args) > 0 {
+			argsText := extractText(fset, src, call.Lparen, call.Rparen+1)
+			closeSuffix += argsText
+		} else {
+			closeSuffix += "()"
+		}
+
+		addNode(id, kind, "", map[string]string{
+			"closure":      "true",
+			"src":          header,
+			"close_suffix": closeSuffix,
+		})
+		walkStatements(g, fset, src, id, fileID, fl.Body.List)
+		return
+	}
+
+	// Simple call (no closure).
+	callText := extractText(fset, src, call.Pos(), call.End())
+	addNode(id, kind, "", map[string]string{
+		"call": callText,
+		"src":  keyword + " " + callText,
+	})
 }
 
 func addCaseClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID string, cc *ast.CaseClause) {
@@ -227,6 +347,10 @@ func addCaseClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 		}
 		caseText = strings.Join(parts, ", ")
 	}
+	caseSrc := "default:"
+	if caseText != "" {
+		caseSrc = "case " + caseText + ":"
+	}
 	_ = g.AddNode(&graph.Node{
 		ID:      id,
 		Kind:    graph.KindStatement,
@@ -234,9 +358,9 @@ func addCaseClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 		File:    fileID,
 		Line:    pos.Line,
 		EndLine: fset.Position(cc.End()).Line,
-		Text:    caseText,
 		Metadata: map[string]string{
 			"case": caseText,
+			"src":  caseSrc,
 		},
 	})
 	_ = g.AddEdge(parentID, id, graph.EdgeContains)
@@ -250,6 +374,10 @@ func addCommClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 	if cc.Comm != nil {
 		comm = extractText(fset, src, cc.Comm.Pos(), cc.Comm.End())
 	}
+	commSrc := "default:"
+	if comm != "" {
+		commSrc = "case " + comm + ":"
+	}
 	_ = g.AddNode(&graph.Node{
 		ID:      id,
 		Kind:    graph.KindStatement,
@@ -257,9 +385,9 @@ func addCommClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 		File:    fileID,
 		Line:    pos.Line,
 		EndLine: fset.Position(cc.End()).Line,
-		Text:    comm,
 		Metadata: map[string]string{
 			"comm": comm,
+			"src":  commSrc,
 		},
 	})
 	_ = g.AddEdge(parentID, id, graph.EdgeContains)
@@ -270,10 +398,4 @@ func addCommClause(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fi
 	walkStatements(g, fset, src, id, fileID, cc.Body)
 }
 
-// declToStmts is a no-op adapter — inline var/const/type declarations inside
-// functions don't produce statement nodes (they're already covered by type/var
-// nodes at the file level). Returning nil skips them.
-func declToStmts(_ *token.FileSet, _ []byte, _ *ast.GenDecl) []ast.Stmt {
-	return nil
-}
 

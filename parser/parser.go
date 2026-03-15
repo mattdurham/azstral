@@ -18,6 +18,11 @@ import (
 
 	"strings"
 )
+type bodyRange struct {
+	lo, hi token.Pos
+	funcID string
+}
+
 // ParseFile parses a single Go file and adds its nodes/edges to the graph.
 func ParseFile(g *graph.Graph, filePath string) error {
 	src, err := os.ReadFile(filePath)
@@ -92,11 +97,14 @@ func ParseFile(g *graph.Graph, filePath string) error {
 	// Build a set of source ranges covered by function bodies.
 	// Comments inside function bodies are captured in fn.Text and must not be
 	// processed as standalone file-level comment nodes.
-	type bodyRange struct{ lo, hi token.Pos }
 	var bodyRanges []bodyRange
 	for _, decl := range f.Decls {
 		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
-			bodyRanges = append(bodyRanges, bodyRange{fd.Body.Lbrace, fd.Body.Rbrace})
+			funcID := "func:" + fd.Name.Name
+			if fd.Recv != nil && len(fd.Recv.List) > 0 {
+				funcID = fmt.Sprintf("func:%s.%s", types2str(fd.Recv.List[0].Type), fd.Name.Name)
+			}
+			bodyRanges = append(bodyRanges, bodyRange{fd.Body.Lbrace, fd.Body.Rbrace, funcID})
 		}
 	}
 	inBody := func(pos token.Pos) bool {
@@ -111,7 +119,10 @@ func ParseFile(g *graph.Graph, filePath string) error {
 	// Process all comment groups.
 	for _, cg := range f.Comments {
 		if inBody(cg.Pos()) {
-			continue // already captured in function body text
+			// Body comment — create as a child of the enclosing function
+			// so statement-tree codegen can interleave it.
+			addBodyComment(g, fset, cg, filePath, fileID, bodyRanges)
+			continue
 		}
 
 		// Store raw comment lines (with // prefix) to preserve exact formatting.
@@ -690,6 +701,83 @@ func extractDirectives(g *graph.Graph, cg *ast.CommentGroup, targetID string) {
 			targetNode.Metadata[name] = "true"
 		}
 	}
+}
+
+// addBodyComment creates a KindComment node for a comment inside a function body
+// and attaches it to the enclosing function node.
+func addBodyComment(g *graph.Graph, fset *token.FileSet, cg *ast.CommentGroup, filePath, fileID string, bodyRanges []bodyRange) {
+	pos := fset.Position(cg.Pos())
+	endPos := fset.Position(cg.End())
+
+	var rawLines []string
+	for _, c := range cg.List {
+		rawLines = append(rawLines, c.Text)
+	}
+	rawText := strings.Join(rawLines, "\n")
+
+	commentID := fmt.Sprintf("bodycomment:%s:%d", filePath, pos.Line)
+
+	// Find which function this comment is inside.
+	funcID := ""
+	for _, br := range bodyRanges {
+		brPos := fset.Position(br.lo)
+		brEnd := fset.Position(br.hi)
+		if pos.Line >= brPos.Line && pos.Line <= brEnd.Line {
+			funcID = br.funcID
+			break
+		}
+	}
+
+	_ = g.AddNode(&graph.Node{
+		ID:      commentID,
+		Kind:    graph.KindComment,
+		Name:    truncate(rawText, 60),
+		File:    fileID,
+		Line:    pos.Line,
+		EndLine: endPos.Line,
+		Text:    rawText,
+		Metadata: map[string]string{
+			"body_comment": "true",
+			"src":          rawText,
+		},
+	})
+
+	// Attach to the tightest enclosing node — a statement if possible, else the function.
+	parentID := ""
+	if funcID != "" {
+		parentID = funcID
+	}
+	// Look for a tighter containing statement node.
+	bestSize := int(^uint(0) >> 1)
+	for _, n := range g.Nodes {
+		if n.File != "file:"+pos.Filename {
+			continue
+		}
+		if !isStmtLike(n.Kind) {
+			continue
+		}
+		if n.EndLine == 0 || n.Line == 0 {
+			continue
+		}
+		if pos.Line >= n.Line && pos.Line <= n.EndLine {
+			size := n.EndLine - n.Line
+			if size < bestSize {
+				bestSize = size
+				parentID = n.ID
+			}
+		}
+	}
+	if parentID != "" {
+		_ = g.AddEdge(parentID, commentID, graph.EdgeContains)
+	}
+}
+
+func isStmtLike(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect, graph.KindStatement:
+		return true
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {

@@ -232,25 +232,18 @@ func RenderFile(g *graph.Graph, st *store.Store, fileID string) (string, error) 
 			}
 			b.WriteString(" {\n")
 
-			// Function body: either explicit Text or child statements.
-			if node.Text != "" {
-				for _, line := range strings.Split(node.Text, "\n") {
-					if line == "" {
-						b.WriteString("\n")
-					} else {
-						b.WriteString("\t")
-						b.WriteString(line)
-						b.WriteString("\n")
-					}
-				}
-			} else {
-				fnStmts := g.Children(node.ID)
-				for _, stmt := range fnStmts {
-					if stmt.Kind == graph.KindStatement {
-						b.WriteString("\t")
-						b.WriteString(stmt.Text)
-						b.WriteString("\n")
-					}
+			// Function body: statement tree if available, Text for manually-built nodes.
+			body, ok := RenderBody(g, node.ID)
+			if !ok {
+				body = node.Text
+			}
+			for _, line := range strings.Split(body, "\n") {
+				if line == "" {
+					b.WriteString("\n")
+				} else {
+					b.WriteString("\t")
+					b.WriteString(line)
+					b.WriteString("\n")
 				}
 			}
 			b.WriteString("}\n")
