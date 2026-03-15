@@ -446,6 +446,36 @@ const Examples = `# Query Examples
 
   # All symbols a package defines
   from == "pkg:graph" && kind == "contains"
+
+## Expressions (expr:binary, expr:unary, expr:ident, expr:index, etc.)
+
+  # All binary expressions using == (equality checks)
+  kind == "expr:binary" && metadata["op"] == "=="
+
+  # All binary expressions using != (inequality / error checks)
+  kind == "expr:binary" && metadata["op"] == "!="
+
+  # All binary expressions in a specific file
+  kind == "expr:binary" && file.contains("parser")
+
+  # All index expressions (slice/map access)
+  kind == "expr:index"
+
+  # All type assertions
+  kind == "expr:typeassert"
+
+  # Inline function literals (e.g. passed to sort.Slice)
+  kind == "expr:func"
+
+  # All identifier expressions with a specific name
+  kind == "expr:ident" && metadata["name"] == "err"
+
+  # Binary expressions whose lhs is "err"
+  kind == "expr:binary" && metadata["lhs_src"] == "err"
+
+  # All selector expressions (struct field access, package.Symbol)
+  kind == "expr:selector"
+
 `
 
 // Help is the query language documentation.
@@ -480,6 +510,17 @@ const Help = `# CEL Graph Query Language
     assign  assignment/:=       — metadata: op, lhs
     send    channel send        — metadata: ch, val
     branch  break/continue/goto — metadata: tok, label
+  Expression node kinds (children of statements/functions):
+    expr:binary     binary expression    — metadata: op, lhs_src, rhs_src
+    expr:unary      unary expression     — metadata: op, x_src
+    expr:ident      identifier           — metadata: name
+    expr:selector   selector (a.B)       — metadata: sel, x_src
+    expr:index      index expr (a[i])    — metadata: x_src, index_src
+    expr:typeassert type assertion        — metadata: x_src, type_src
+    expr:call       call expression      — metadata: fun_src
+    expr:func       function literal     — (no extra metadata)
+    expr:composite  composite literal    — metadata: type_src
+    expr:star       pointer deref (*x)   — metadata: x_src
 
   metadata     map     full key-value metadata; use .num(key) for numeric lookup
                        e.g. metadata.num("bench_rows_op") > 20.0
@@ -545,4 +586,5 @@ const Help = `# CEL Graph Query Language
 
   # All edges from a package (edge query)
   from.startsWith("pkg:") && kind == "contains"
+
 `

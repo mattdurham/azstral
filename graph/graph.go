@@ -42,6 +42,19 @@ const (
 	KindSelector NodeKind = "selector" // a selector: fmt.Println (pkg + method)
 	KindIdent    NodeKind = "ident"    // an identifier: fmt, Println, x
 	KindLiteral  NodeKind = "literal"  // a literal value: "Hello World!", 42, true
+
+	// Expression-tree node kinds — fine-grained AST nodes for expression analysis.
+	// SPEC-008: Expression node kinds.
+	// NOTE: Any changes to this file must be reflected in SPECS.md and NOTES.md.
+	KindExprBinary     NodeKind = "expr:binary"     // binary op: a + b, x == y
+	KindExprUnary      NodeKind = "expr:unary"       // unary op: -x, !ok, ^n
+	KindExprIdent      NodeKind = "expr:ident"       // identifier leaf: x, items
+	KindExprSelector   NodeKind = "expr:selector"    // selector: os.Stderr, s.Field
+	KindExprIndex      NodeKind = "expr:index"       // index: items[0], m[k]
+	KindExprLiteral    NodeKind = "expr:literal"     // basic literal: 42, "hello", true
+	KindExprComposite  NodeKind = "expr:composite"   // composite literal: Point{1, 2}
+	KindExprTypeAssert NodeKind = "expr:typeassert"  // type assertion: v.(int)
+	KindExprFunc       NodeKind = "expr:func"        // function literal: func(x int) bool { ... }
 )
 
 // EdgeKind represents the type of a graph edge.

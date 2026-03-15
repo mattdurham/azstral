@@ -20,3 +20,11 @@ The azstral system shall support node types: Package, File, Function, Type, Vari
 
 ## SPEC-007
 The azstral system shall support edge types: Contains, Calls, References, Annotates, and Covers.
+
+## SPEC-008
+The azstral system shall support expression-level node types: ExprBinary,
+ExprUnary, ExprIdent, ExprSelector, ExprIndex, ExprLiteral, ExprComposite,
+ExprTypeAssert, and ExprFunc. These nodes are children of statement nodes and
+represent the internal expression tree of Go statements. They are created by
+the parser but ignored by the code generator (codegen uses src metadata
+strings from statement nodes for reconstruction).
