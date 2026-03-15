@@ -88,32 +88,6 @@ type listEdgesInput struct {
 
 // --- Parse tools ---
 func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "parse_file",
-		Description: "Parse a Go source file and add its AST to the graph.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
-		if input.Path == "" {
-			return toolError("path is required"), nil, nil
-		}
-		if err := parser.ParseFile(g, input.Path); err != nil {
-			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
-		}
-		return toolText(fmt.Sprintf("parsed %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
-	})
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "parse_dir",
-		Description: "Parse all Go files in a directory.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
-		if input.Path == "" {
-			return toolError("path is required"), nil, nil
-		}
-		if err := parser.ParseDir(g, input.Path); err != nil {
-			return toolError(fmt.Sprintf("parse error: %v", err)), nil, nil
-		}
-		return toolText(fmt.Sprintf("parsed dir %s — %d nodes", input.Path, len(g.Nodes))), nil, nil
-	})
-
 	type parseFilesInput struct {
 		Paths []string `json:"paths" jsonschema:"array of absolute file paths to parse"`
 	}
@@ -171,17 +145,6 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 		Description: "Return the full code graph as JSON.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 		return toolJSON(g), nil, nil
-	})
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "get_node",
-		Description: "Return a single graph node by ID.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input nodeIDInput) (*mcp.CallToolResult, any, error) {
-		node, ok := g.GetNode(input.ID)
-		if !ok {
-			return toolError(fmt.Sprintf("node %q not found", input.ID)), nil, nil
-		}
-		return toolNode(node), nil, nil
 	})
 
 	type getNodesInput struct {
@@ -242,63 +205,43 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		Kind     string            `json:"kind" jsonschema:"node kind: package, file, function, type, variable, comment, import, statement"`
 		Name     string            `json:"name" jsonschema:"node name (package name, function name, import path, etc.)"`
 		Text     string            `json:"text,omitempty" jsonschema:"text content: function body, statement code, comment text, type definition"`
-		File     string            `json:"file,omitempty" jsonschema:"source file path this node belongs to"`
+		File     string            `json:"file,omitempty" jsonschema:"source file path this node belongs to (file: node ID)"`
 		Line     int               `json:"line,omitempty" jsonschema:"line number for ordering within parent"`
-		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"key-value metadata: alias, params, returns, receiver, const, type"`
+		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"key-value metadata: alias, params, returns, receiver, const, type, package"`
 	}
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "add_node",
-		Description: "Add a node to the code graph. Use kind to specify what it represents (package, file, function, import, statement, etc.).",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input addNodeInput) (*mcp.CallToolResult, any, error) {
-		n := &graph.Node{
-			ID:       input.ID,
-			Kind:     graph.NodeKind(input.Kind),
-			Name:     input.Name,
-			Text:     input.Text,
-			File:     input.File,
-			Line:     input.Line,
-			Metadata: input.Metadata,
-		}
-		if err := g.AddNode(n); err != nil {
-			return toolError(err.Error()), nil, nil
-		}
-		// Sync to disk based on node kind.
+	syncNodeToDisk := func(n *graph.Node) string {
 		switch n.Kind {
 		case graph.KindFile:
-			// Create the physical file with a package declaration.
 			filePath := strings.TrimPrefix(n.ID, "file:")
-			if filePath != n.ID { // only if ID has file: prefix
+			if filePath != n.ID {
 				pkg := n.Metadata["package"]
 				if pkg == "" {
 					pkg = filepath.Base(filepath.Dir(filePath))
 				}
 				if err := createGoFile(filePath, pkg); err != nil {
-					return toolText(fmt.Sprintf("added %s — warning: %v", n.ID, err)), nil, nil
+					return err.Error()
 				}
 			}
 		case graph.KindFunction:
-			// Append function to its file.
 			if n.File != "" && n.Text != "" {
 				filePath := strings.TrimPrefix(n.File, "file:")
-				params := n.Metadata["params"]
-				returns := n.Metadata["returns"]
-				receiver := n.Metadata["receiver"]
-				if err := edit.AppendFunction(filePath, n.Name, receiver, params, returns, n.Text); err != nil {
-					return toolText(fmt.Sprintf("added %s — warning: %v", n.ID, err)), nil, nil
+				if err := edit.AppendFunction(filePath, n.Name, n.Metadata["receiver"],
+					n.Metadata["params"], n.Metadata["returns"], n.Text); err != nil {
+					return err.Error()
 				}
 			}
 		}
-		return toolNode(n), nil, nil
-	})
+		return ""
+	}
 
 	type addNodesInput struct {
-		Nodes []addNodeInput `json:"nodes" jsonschema:"array of nodes to add"`
+		Nodes []addNodeInput `json:"nodes" jsonschema:"array of nodes to add. kind=file creates the file on disk; kind=function appends to its file."`
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_nodes",
-		Description: "Add multiple nodes to the code graph in a single call. Returns count of nodes added and any errors.",
+		Description: "Add nodes to the code graph. Automatically syncs to disk: file nodes create the .go file, function nodes append to their file.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input addNodesInput) (*mcp.CallToolResult, any, error) {
 		var errs []string
 		added := 0
@@ -314,9 +257,12 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			}
 			if err := g.AddNode(n); err != nil {
 				errs = append(errs, fmt.Sprintf("%s: %v", item.ID, err))
-			} else {
-				added++
+				continue
 			}
+			if warn := syncNodeToDisk(n); warn != "" {
+				errs = append(errs, fmt.Sprintf("%s (disk): %s", item.ID, warn))
+			}
+			added++
 		}
 		msg := fmt.Sprintf("added %d/%d nodes", added, len(input.Nodes))
 		if len(errs) > 0 {
@@ -334,33 +280,6 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		EndLine  *int              `json:"end_line,omitempty" jsonschema:"new end line"`
 		Metadata map[string]string `json:"metadata,omitempty" jsonschema:"metadata keys to set or update"`
 	}
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "update_node",
-		Description: "Update fields on an existing graph node. Only provided fields are changed; omitted fields are left as-is.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input updateNodeInput) (*mcp.CallToolResult, any, error) {
-		patch := graph.NodePatch{
-			Name:     input.Name,
-			Text:     input.Text,
-			File:     input.File,
-			Line:     input.Line,
-			EndLine:  input.EndLine,
-			Metadata: input.Metadata,
-		}
-		if err := g.UpdateNode(input.ID, patch); err != nil {
-			return toolError(err.Error()), nil, nil
-		}
-		node, _ := g.GetNode(input.ID)
-		// Sync function body changes directly to disk — no write_file needed.
-		if input.Text != nil && node.Kind == graph.KindFunction && node.File != "" {
-			filePath := strings.TrimPrefix(node.File, "file:")
-			if err := edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *input.Text); err != nil {
-				// Non-fatal: graph is updated, file patch failed. Return warning.
-				return toolText(fmt.Sprintf("updated %s — warning: %v", node.ID, err)), nil, nil
-			}
-		}
-		return toolNode(node), nil, nil
-	})
 
 	type updateNodesInput struct {
 		Nodes []updateNodeInput `json:"nodes" jsonschema:"array of node updates to apply"`
@@ -410,16 +329,6 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		Kind string `json:"kind" jsonschema:"edge kind: contains, calls, references, annotates, covers"`
 	}
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "add_edge",
-		Description: "Add a directed edge between two nodes. Use 'contains' for parent-child (package→file, file→function), 'calls' for call relationships, 'annotates' for comment→code.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input addEdgeInput) (*mcp.CallToolResult, any, error) {
-		if err := g.AddEdge(input.From, input.To, graph.EdgeKind(input.Kind)); err != nil {
-			return toolError(err.Error()), nil, nil
-		}
-		return toolText(fmt.Sprintf("added edge %s -[%s]-> %s", input.From, input.Kind, input.To)), nil, nil
-	})
-
 	type addEdgesInput struct {
 		Edges []addEdgeInput `json:"edges" jsonschema:"array of edges to add"`
 	}
@@ -449,16 +358,6 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 		To   string `json:"to" jsonschema:"target node ID"`
 		Kind string `json:"kind" jsonschema:"edge kind: contains, calls, callee, references, annotates, covers"`
 	}
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "delete_edge",
-		Description: "Remove a directed edge between two nodes. Useful for correcting spurious edges before rendering a file.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input deleteEdgeInput) (*mcp.CallToolResult, any, error) {
-		if err := g.RemoveEdge(input.From, input.To, graph.EdgeKind(input.Kind)); err != nil {
-			return toolError(err.Error()), nil, nil
-		}
-		return toolText(fmt.Sprintf("removed edge %s -[%s]-> %s", input.From, input.Kind, input.To)), nil, nil
-	})
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "delete_edges",

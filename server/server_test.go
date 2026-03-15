@@ -51,7 +51,7 @@ func TestMCPServer_ParseAndQuery(t *testing.T) {
 	session := setupTestServer(t)
 	helloPath := findHelloMain(t)
 
-	callTool(t, session, "parse_file", map[string]any{"path": helloPath})
+	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
 
 	// Full graph.
 	text := callTool(t, session, "get_graph", nil)
@@ -63,8 +63,8 @@ func TestMCPServer_ParseAndQuery(t *testing.T) {
 		t.Fatal("graph has no nodes")
 	}
 
-	// Specific node.
-	callTool(t, session, "get_node", map[string]any{"id": "func:main"})
+	// Specific nodes.
+	callTool(t, session, "get_nodes", map[string]any{"ids": []string{"func:main"}})
 
 	// List by kind.
 	callTool(t, session, "list_nodes", map[string]any{"kind": "function"})
@@ -85,34 +85,19 @@ func TestMCPServer_BuildHelloWorld(t *testing.T) {
 	})
 
 	// 2. Build graph nodes.
-	callTool(t, session, "add_node", map[string]any{
-		"id": "pkg:main", "kind": "package", "name": "main",
-	})
-	callTool(t, session, "add_node", map[string]any{
-		"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1,
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "pkg:main", "to": "file:main.go", "kind": "contains",
-	})
-
-	// Import.
-	callTool(t, session, "add_node", map[string]any{
-		"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10,
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "file:main.go", "to": "import:fmt", "kind": "contains",
-	})
-
-	// Function.
-	callTool(t, session, "add_node", map[string]any{
-		"id": "func:main", "kind": "function", "name": "main",
-		"text":     "fmt.Println(\"Hello World\")",
-		"line":     20,
-		"metadata": map[string]any{"params": "()", "returns": ""},
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "file:main.go", "to": "func:main", "kind": "contains",
-	})
+	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
+		{"id": "pkg:main", "kind": "package", "name": "main"},
+		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
+		{"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10},
+		{"id": "func:main", "kind": "function", "name": "main",
+			"text": "fmt.Println(\"Hello World\")", "line": 20,
+			"metadata": map[string]any{"params": "()", "returns": ""}},
+	}})
+	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
+		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
+		{"from": "file:main.go", "to": "import:fmt", "kind": "contains"},
+		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
+	}})
 
 	// 3. Link specs to code.
 	callTool(t, session, "link_spec", map[string]any{
@@ -154,29 +139,19 @@ func TestMCPServer_MutateHelloWorld(t *testing.T) {
 		"id": "SPEC-004", "kind": "SPEC", "namespace": "",
 		"title": "Print Hello World! to the console",
 	})
-	callTool(t, session, "add_node", map[string]any{
-		"id": "pkg:main", "kind": "package", "name": "main",
-	})
-	callTool(t, session, "add_node", map[string]any{
-		"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1,
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "pkg:main", "to": "file:main.go", "kind": "contains",
-	})
-	callTool(t, session, "add_node", map[string]any{
-		"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10,
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "file:main.go", "to": "import:fmt", "kind": "contains",
-	})
-	callTool(t, session, "add_node", map[string]any{
-		"id": "func:main", "kind": "function", "name": "main",
-		"text": `fmt.Println("Hello World")`, "line": 20,
-		"metadata": map[string]any{"params": "()", "returns": ""},
-	})
-	callTool(t, session, "add_edge", map[string]any{
-		"from": "file:main.go", "to": "func:main", "kind": "contains",
-	})
+	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
+		{"id": "pkg:main", "kind": "package", "name": "main"},
+		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
+		{"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10},
+		{"id": "func:main", "kind": "function", "name": "main",
+			"text": `fmt.Println("Hello World")`, "line": 20,
+			"metadata": map[string]any{"params": "()", "returns": ""}},
+	}})
+	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
+		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
+		{"from": "file:main.go", "to": "import:fmt", "kind": "contains"},
+		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
+	}})
 	callTool(t, session, "link_spec", map[string]any{
 		"spec_id": "SPEC-004", "node_id": "func:main",
 	})
@@ -188,11 +163,10 @@ func TestMCPServer_MutateHelloWorld(t *testing.T) {
 	}
 	t.Logf("BEFORE mutation:\n%s", src)
 
-	// 2. Mutate: update the function body text via update_node.
-	callTool(t, session, "update_node", map[string]any{
-		"id":   "func:main",
-		"text": `fmt.Println("Hello World!")`,
-	})
+	// 2. Mutate: update the function body text via update_nodes.
+	callTool(t, session, "update_nodes", map[string]any{"nodes": []map[string]any{
+		{"id": "func:main", "text": `fmt.Println("Hello World!")`},
+	}})
 
 	// 3. Render again — should now have the exclamation mark.
 	src = callTool(t, session, "render", map[string]any{"id": "file:main.go"})
