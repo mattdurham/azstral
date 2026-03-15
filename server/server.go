@@ -17,6 +17,7 @@ import (
 	"github.com/matt/azstral/parser"
 	"github.com/matt/azstral/query"
 	"github.com/matt/azstral/store"
+	"github.com/matt/azstral/testcov"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 // New creates an MCP server with all azstral tools registered.
@@ -65,6 +66,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerCCGFTools(srv, g)
 	registerCELTools(srv, g)
 	registerGraphTools(srv, g, root)
+	registerTestTools(srv, g, root)
 	return srv, nil
 }
 
@@ -892,6 +894,57 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 		Description: "Return the CEL query language documentation — available fields, operators, and examples for query_nodes and query_edges.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 		return toolText(query.Help), nil, nil
+	})
+}
+
+// --- Test and coverage tools ---
+
+func registerTestTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type runTestsInput struct {
+		Package string `json:"package,omitempty" jsonschema:"package pattern to test, e.g. './...' or './internal/executor'. Defaults to './...'"`
+		Run     string `json:"run,omitempty" jsonschema:"optional -run regex to filter tests, e.g. 'TestParse'"`
+		Dir     string `json:"dir,omitempty" jsonschema:"working directory for go test. Defaults to working root."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_tests",
+		Description: "Run go test with coverage and annotate graph nodes with results. " +
+			"After calling this, query_nodes supports: " +
+			"coverage (float 0-100), test_status ('pass'|'fail'|'covered'|'untested'). " +
+			"Example queries: " +
+			"kind==\"function\" && coverage < 50 — low coverage functions; " +
+			"test_status == \"fail\" — failing tests; " +
+			"kind==\"function\" && test_status == \"untested\" && cyclomatic > 10 — risky untested functions.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input runTestsInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		res, err := testcov.Run(g, dir, input.Package, input.Run)
+		if err != nil {
+			// Non-fatal — partial results are still useful.
+			return toolText(fmt.Sprintf(
+				"tests: %d passed, %d failed, %d skipped — overall coverage: %.1f%% (warning: %v)",
+				res.Passed, res.Failed, res.Skipped, res.Coverage, err,
+			)), nil, nil
+		}
+
+		msg := fmt.Sprintf(
+			"tests: %d passed, %d failed, %d skipped — overall coverage: %.1f%%",
+			res.Passed, res.Failed, res.Skipped, res.Coverage,
+		)
+		if len(res.Failures) > 0 {
+			msg += fmt.Sprintf("\nfailed tests:")
+			for _, f := range res.Failures {
+				msg += fmt.Sprintf("\n  FAIL %s/%s", f.Package, f.Test)
+			}
+		}
+		msg += "\nGraph nodes annotated. Query with: test_status == \"fail\" or coverage < 50"
+		return toolText(msg), nil, nil
 	})
 }
 

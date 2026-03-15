@@ -102,6 +102,8 @@ func nodeEnv() (*cel.Env, error) {
 		cel.Variable("callee_ids", cel.ListType(cel.StringType)),
 		cel.Variable("caller_ids", cel.ListType(cel.StringType)),
 		cel.Variable("child_ids", cel.ListType(cel.StringType)),
+		cel.Variable("coverage", cel.DoubleType),
+		cel.Variable("test_status", cel.StringType),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("node env: %w", err)
@@ -188,10 +190,12 @@ func nodeActivation(g *graph.Graph, n *graph.Node, callerIndex map[string][]stri
 		"receiver":   n.Metadata["receiver"],
 		"params":     n.Metadata["params"],
 		"returns":    n.Metadata["returns"],
-		"parent_id":  parentID,
-		"callee_ids": calleeIDs,
-		"caller_ids": callerIDs,
-		"child_ids":  childIDs,
+		"parent_id":   parentID,
+		"callee_ids":  calleeIDs,
+		"caller_ids":  callerIDs,
+		"child_ids":   childIDs,
+		"coverage":    metaFloat64(n, "coverage"),
+		"test_status": n.Metadata["test_status"],
 	}
 }
 
@@ -225,7 +229,13 @@ func metaInt(n *graph.Node, key string) int64 {
 	return v
 }
 
+func metaFloat64(n *graph.Node, key string) float64 {
+	v, _ := strconv.ParseFloat(n.Metadata[key], 64)
+	return v
+}
+
 // Help is the query language documentation returned by the query_help tool.
+// Help is the query language documentation.
 const Help = `# CEL Graph Query Language
 
 ## Node query variables
@@ -246,6 +256,8 @@ const Help = `# CEL Graph Query Language
   callee_ids  list    IDs of functions this node calls
   caller_ids  list    IDs of functions that call this node
   child_ids   list    IDs of direct children
+  coverage    float   statement coverage % (0-100); 0 if run_tests not called
+  test_status string  "pass" | "fail" | "untested" | "covered"; "" if not run
 
 ## Edge query variables
 
