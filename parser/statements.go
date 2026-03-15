@@ -56,7 +56,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Cond != nil {
 			cond = extractText(fset, src, s.Cond.Pos(), s.Cond.End())
 		}
-		addNode(id, graph.KindFor, extractText(fset, src, s.Pos(), s.End()), map[string]string{
+		addNode(id, graph.KindFor, "", map[string]string{
 			"cond": cond,
 		})
 		if s.Body != nil {
@@ -73,7 +73,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			meta["value"] = extractText(fset, src, s.Value.Pos(), s.Value.End())
 		}
 		meta["over"] = extractText(fset, src, s.X.Pos(), s.X.End())
-		addNode(id, graph.KindFor, extractText(fset, src, s.Pos(), s.End()), meta)
+		addNode(id, graph.KindFor, "", meta)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
 		}
@@ -85,7 +85,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Else != nil {
 			meta["has_else"] = "true"
 		}
-		addNode(id, graph.KindIf, cond, meta)
+		addNode(id, graph.KindIf, "", meta)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
 		}
@@ -99,7 +99,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Tag != nil {
 			tag = extractText(fset, src, s.Tag.Pos(), s.Tag.End())
 		}
-		addNode(id, graph.KindSwitch, tag, map[string]string{"tag": tag})
+		addNode(id, graph.KindSwitch, "", map[string]string{"tag": tag})
 		if s.Body != nil {
 			for _, c := range s.Body.List {
 				if cc, ok := c.(*ast.CaseClause); ok {
@@ -111,7 +111,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 	case *ast.TypeSwitchStmt:
 		id := stmtID("switch")
 		assign := extractText(fset, src, s.Assign.Pos(), s.Assign.End())
-		addNode(id, graph.KindSwitch, assign, map[string]string{
+		addNode(id, graph.KindSwitch, "", map[string]string{
 			"type_switch": "true",
 			"assign":      assign,
 		})
@@ -136,24 +136,23 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 
 	case *ast.ReturnStmt:
 		id := stmtID("return")
-		vals := extractText(fset, src, s.Pos(), s.End())
 		var valueTexts []string
 		for _, v := range s.Results {
 			valueTexts = append(valueTexts, extractText(fset, src, v.Pos(), v.End()))
 		}
-		addNode(id, graph.KindReturn, vals, map[string]string{
+		addNode(id, graph.KindReturn, "", map[string]string{
 			"values": strings.Join(valueTexts, ", "),
 		})
 
 	case *ast.DeferStmt:
 		id := stmtID("defer")
 		call := extractText(fset, src, s.Call.Pos(), s.Call.End())
-		addNode(id, graph.KindDefer, call, map[string]string{"call": call})
+		addNode(id, graph.KindDefer, "", map[string]string{"call": call})
 
 	case *ast.GoStmt:
 		id := stmtID("go")
 		call := extractText(fset, src, s.Call.Pos(), s.Call.End())
-		addNode(id, graph.KindGo, call, map[string]string{"call": call})
+		addNode(id, graph.KindGo, "", map[string]string{"call": call})
 
 	case *ast.AssignStmt:
 		id := stmtID("assign")
@@ -162,16 +161,21 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		for _, l := range s.Lhs {
 			lhsParts = append(lhsParts, extractText(fset, src, l.Pos(), l.End()))
 		}
-		addNode(id, graph.KindAssign, extractText(fset, src, s.Pos(), s.End()), map[string]string{
+		var rhsParts []string
+		for _, r := range s.Rhs {
+			rhsParts = append(rhsParts, extractText(fset, src, r.Pos(), r.End()))
+		}
+		addNode(id, graph.KindAssign, "", map[string]string{
 			"op":  op,
 			"lhs": strings.Join(lhsParts, ", "),
+			"rhs": strings.Join(rhsParts, ", "),
 		})
 
 	case *ast.SendStmt:
 		id := stmtID("send")
 		ch := extractText(fset, src, s.Chan.Pos(), s.Chan.End())
 		val := extractText(fset, src, s.Value.Pos(), s.Value.End())
-		addNode(id, graph.KindSend, extractText(fset, src, s.Pos(), s.End()), map[string]string{
+		addNode(id, graph.KindSend, "", map[string]string{
 			"ch":  ch,
 			"val": val,
 		})
@@ -182,7 +186,7 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Label != nil {
 			label = s.Label.Name
 		}
-		addNode(id, graph.KindBranch, s.Tok.String(), map[string]string{
+		addNode(id, graph.KindBranch, "", map[string]string{
 			"tok":   s.Tok.String(),
 			"label": label,
 		})
@@ -199,8 +203,9 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 
 	case *ast.IncDecStmt:
 		id := stmtID("assign")
-		addNode(id, graph.KindAssign, extractText(fset, src, s.Pos(), s.End()), map[string]string{
-			"op": s.Tok.String(),
+		addNode(id, graph.KindAssign, "", map[string]string{
+			"op":  s.Tok.String(),
+			"lhs": extractText(fset, src, s.X.Pos(), s.X.End()),
 		})
 
 	case *ast.DeclStmt:

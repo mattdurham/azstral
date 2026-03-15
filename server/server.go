@@ -728,11 +728,14 @@ func toolNode(n *graph.Node) *mcp.CallToolResult {
 	if n.Metadata["external"] == "true" {
 		fmt.Fprintf(&b, "a %s ro 1\n", id)
 	}
-	// Include body text so get_nodes gives everything needed without a separate read.
-	if n.Text != "" {
-		// Escape newlines so each attribute stays on one line.
-		escaped := strings.ReplaceAll(n.Text, "\n", "\\n")
-		fmt.Fprintf(&b, "a %s text %s\n", id, escaped)
+	// Include body text for content-bearing nodes (functions, types, variables, comments).
+	// Statement nodes (for, if, switch, etc.) use metadata instead.
+	switch n.Kind {
+	case graph.KindFunction, graph.KindType, graph.KindVariable, graph.KindComment:
+		if n.Text != "" {
+			escaped := strings.ReplaceAll(n.Text, "\n", "\\n")
+			fmt.Fprintf(&b, "a %s text %s\n", id, escaped)
+		}
 	}
 
 	return toolText(strings.TrimRight(b.String(), "\n"))
