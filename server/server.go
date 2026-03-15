@@ -71,6 +71,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerTestTools(srv, g, root)
 	registerEscapeTools(srv, g, root)
 	registerBenchTools(srv, g, root)
+	registerHotspotTools(srv, g, root)
 	return srv, nil
 }
 
@@ -727,6 +728,12 @@ func toolNode(n *graph.Node) *mcp.CallToolResult {
 	if n.Metadata["external"] == "true" {
 		fmt.Fprintf(&b, "a %s ro 1\n", id)
 	}
+	// Include body text so get_nodes gives everything needed without a separate read.
+	if n.Text != "" {
+		// Escape newlines so each attribute stays on one line.
+		escaped := strings.ReplaceAll(n.Text, "\n", "\\n")
+		fmt.Fprintf(&b, "a %s text %s\n", id, escaped)
+	}
 
 	return toolText(strings.TrimRight(b.String(), "\n"))
 }
@@ -1070,6 +1077,84 @@ func registerBenchTools(srv *mcp.Server, g *graph.Graph, root string) {
 		}
 		b.WriteString("\nGraph nodes annotated. Query with: pprof_flat_pct > 5.0")
 		return toolText(b.String()), nil, nil
+	})
+}
+
+// --- Hotspot analysis ---
+
+func registerHotspotTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type findHotspotsInput struct {
+		Package   string `json:"package,omitempty" jsonschema:"package pattern. Defaults to './...'"`
+		Dir       string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+		MinAllocs int    `json:"min_allocs,omitempty" jsonschema:"minimum heap_allocs to include. Defaults to 1."`
+		TopN      int    `json:"top_n,omitempty" jsonschema:"max results. Defaults to 20."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "find_hotspots",
+		Description: "Run escape analysis then return the top heap-allocating non-external functions " +
+			"with their full source text in one call. " +
+			"Replaces the run_escape → query_nodes → get_nodes sequence. " +
+			"Each result is a CCGF node block including body text ready for update_nodes.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input findHotspotsInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+		minAllocs := input.MinAllocs
+		if minAllocs < 1 {
+			minAllocs = 1
+		}
+		topN := input.TopN
+		if topN <= 0 {
+			topN = 20
+		}
+
+		res, err := escape.Run(g, dir, input.Package)
+		if err != nil {
+			return toolError(fmt.Sprintf("escape analysis: %v", err)), nil, nil
+		}
+
+		// Collect and rank non-external functions by heap_allocs.
+		type entry struct {
+			n     *graph.Node
+			heaps int
+		}
+		var entries []entry
+		for _, n := range g.NodesByKind(graph.KindFunction) {
+			if n.Metadata["external"] == "true" {
+				continue
+			}
+			heaps := res.HeapByFunc[n.ID]
+			if heaps >= minAllocs {
+				entries = append(entries, entry{n, heaps})
+			}
+		}
+		// Sort by heap_allocs descending.
+		for i := 1; i < len(entries); i++ {
+			for j := i; j > 0 && entries[j].heaps > entries[j-1].heaps; j-- {
+				entries[j], entries[j-1] = entries[j-1], entries[j]
+			}
+		}
+		if len(entries) > topN {
+			entries = entries[:topN]
+		}
+		if len(entries) == 0 {
+			return toolText("no heap-allocating functions found — try a broader package pattern"), nil, nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "# %d hotspot functions (escape analysis: %d total, %d heap)\n\n",
+			len(entries), res.Total, res.HeapTotal)
+		for _, e := range entries {
+			r := toolNode(e.n)
+			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
+			fmt.Fprintf(&b, "\na %s heap_allocs %d\n\n", e.n.ID, e.heaps)
+		}
+		return toolText(strings.TrimSpace(b.String())), nil, nil
 	})
 }
 

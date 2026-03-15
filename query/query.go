@@ -356,6 +356,12 @@ const Examples = `# Query Examples
   metadata.num("p99_ns") > 5000.0
   metadata.num("bench_rows_op") > 0.0 && bench_ns_op > 200.0
 
+## Allocation hotspots — fast workflow
+
+  # Single call: escape analysis + rank + return body text ready for editing
+  # (replaces run_escape → query_nodes → get_nodes — saves ~10 round-trips)
+  find_hotspots  min_allocs=3  top_n=20
+
 ## Allocations (requires run_escape)
 
   # Functions that cause heap allocations
