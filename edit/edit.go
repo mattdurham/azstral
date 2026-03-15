@@ -16,6 +16,43 @@ import (
 	"strings"
 )
 
+// TypeBody replaces the type expression of a named type in a Go source file.
+// newBody is the type expression as stored in the graph node Text field —
+// e.g. "struct{ X int }" or "interface{ Foo() error }" or "string".
+func TypeBody(filePath, typeName, newBody string) error {
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filePath, src, 0)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", filePath, err)
+	}
+
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			start := fset.Position(ts.Type.Pos()).Offset
+			end := fset.Position(ts.Type.End()).Offset
+			out := make([]byte, 0, len(src)-end+start+len(newBody))
+			out = append(out, src[:start]...)
+			out = append(out, []byte(newBody)...)
+			out = append(out, src[end:]...)
+			return os.WriteFile(filePath, out, 0o644)
+		}
+	}
+	return fmt.Errorf("type %s not found in %s", typeName, filePath)
+}
+
 // FunctionBody replaces the body of a named function in a Go source file.
 // name is the function name; receiver is the receiver type string (e.g. "*Graph"),
 // or empty for package-level functions. newBody is the body text as stored in

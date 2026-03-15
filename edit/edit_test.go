@@ -131,6 +131,52 @@ func TestAppendFunction_Method(t *testing.T) {
 	}
 }
 
+func TestTypeBody_Struct(t *testing.T) {
+	src := `package main
+
+type Foo struct {
+	X int
+}
+
+type Bar interface{ Do() }
+`
+	path := writeTmp(t, src)
+	if err := TypeBody(path, "Foo", "struct {\n\tX int\n\tY string\n}"); err != nil {
+		t.Fatal(err)
+	}
+	got := readTmp(t, path)
+	if !strings.Contains(got, "Y string") {
+		t.Errorf("new field not present:\n%s", got)
+	}
+	if strings.Contains(got, "X int\n}") {
+		t.Errorf("old struct body still present:\n%s", got)
+	}
+	// Bar must be untouched.
+	if !strings.Contains(got, "type Bar interface{ Do() }") {
+		t.Errorf("Bar was modified:\n%s", got)
+	}
+}
+
+func TestTypeBody_Interface(t *testing.T) {
+	src := "package main\n\ntype Doer interface{ Old() }\n"
+	path := writeTmp(t, src)
+	if err := TypeBody(path, "Doer", "interface{ New() error }"); err != nil {
+		t.Fatal(err)
+	}
+	got := readTmp(t, path)
+	if !strings.Contains(got, "New() error") {
+		t.Errorf("new method not present:\n%s", got)
+	}
+}
+
+func TestTypeBody_NotFound(t *testing.T) {
+	src := "package main\ntype Foo struct{}\n"
+	path := writeTmp(t, src)
+	if err := TypeBody(path, "Nonexistent", "struct{}"); err == nil {
+		t.Error("expected error for missing type")
+	}
+}
+
 func TestRenameIdentifier_Function(t *testing.T) {
 	src := `package main
 

@@ -335,10 +335,17 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 				continue
 			}
 			node, _ := g.GetNode(item.ID)
-			if item.Text != nil && node.Kind == graph.KindFunction && node.File != "" {
+			if item.Text != nil && node.File != "" {
 				filePath := strings.TrimPrefix(node.File, "file:")
-				if err := edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *item.Text); err != nil {
-					errs = append(errs, fmt.Sprintf("%s (disk): %v", item.ID, err))
+				var diskErr error
+				switch node.Kind {
+				case graph.KindFunction:
+					diskErr = edit.FunctionBody(filePath, node.Name, node.Metadata["receiver"], *item.Text)
+				case graph.KindType:
+					diskErr = edit.TypeBody(filePath, node.Name, *item.Text)
+				}
+				if diskErr != nil {
+					errs = append(errs, fmt.Sprintf("%s (disk): %v", item.ID, diskErr))
 				}
 			}
 			lines = append(lines, fmt.Sprintf("s %s %s", node.ID, node.Name))
