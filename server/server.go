@@ -6,9 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/matt/azstral/ccgf"
@@ -1070,13 +1073,18 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 
 func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 	type celInput struct {
-		Expr string `json:"expr" jsonschema:"CEL expression to evaluate against each node or edge. Call query_help for available fields and examples."`
+		Expr   string `json:"expr" jsonschema:"CEL expression to evaluate against each node or edge. Call query_help for available fields and examples."`
+		SortBy string `json:"sort_by,omitempty" jsonschema:"field to sort results by (e.g. cyclomatic, cognitive, coverage, heap_allocs, bench_ns_op, name, line). Numeric fields sort descending by default."`
+		TopN   int    `json:"top_n,omitempty"   jsonschema:"return only the top N results after sorting (descending). Use with sort_by."`
+		BottomN int   `json:"bottom_n,omitempty" jsonschema:"return only the bottom N results after sorting (ascending). Use with sort_by."`
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "query_nodes",
 		Description: "Query graph nodes using a CEL expression. " +
 			"Returns all nodes where the expression is true. " +
+			"Use sort_by with top_n/bottom_n to rank results: " +
+			"e.g. sort_by=\"cyclomatic\" top_n=10 returns the 10 most complex functions. " +
 			"Available fields: id, kind, name, file, line, text, external, " +
 			"cyclomatic, cognitive, receiver, params, returns, parent_id, " +
 			"callee_ids, caller_ids, child_ids. " +
@@ -1092,6 +1100,19 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 		if len(nodes) == 0 {
 			return toolText("no matches"), nil, nil
 		}
+
+		// Sort if requested.
+		if input.SortBy != "" {
+			sortNodes(nodes, input.SortBy, input.BottomN > 0)
+		}
+
+		// Slice top_n / bottom_n.
+		if input.TopN > 0 && input.TopN < len(nodes) {
+			nodes = nodes[:input.TopN]
+		} else if input.BottomN > 0 && input.BottomN < len(nodes) {
+			nodes = nodes[len(nodes)-input.BottomN:]
+		}
+
 		// Include integer idx on each node so callers can use get_nodes(idxs=[...]).
 		type nodeWithIdx struct {
 			*graph.Node
@@ -1612,6 +1633,81 @@ func registerImportTools(srv *mcp.Server, g *graph.Graph) {
 		importID := fmt.Sprintf("import:%s:%s", input.FileID, input.ImportPath)
 		_ = g.DeleteNode(importID)
 		return toolText(fmt.Sprintf("removed import %q from %s", input.ImportPath, input.FileID)), nil, nil
+	})
+}
+
+// sortNodes sorts nodes by a named field. ascending=false means descending (highest first).
+// Numeric fields (cyclomatic, cognitive, coverage, heap_allocs, stack_allocs,
+// bench_ns_op, bench_b_op, bench_allocs_op, pprof_flat_pct, pprof_cum_pct, line)
+// are sorted numerically. Everything else sorts lexicographically.
+func sortNodes(nodes []*graph.Node, field string, ascending bool) {
+	getFloat := func(n *graph.Node) float64 {
+		switch field {
+		case "cyclomatic":
+			v, _ := strconv.ParseFloat(n.Metadata["cyclomatic"], 64)
+			return v
+		case "cognitive":
+			v, _ := strconv.ParseFloat(n.Metadata["cognitive"], 64)
+			return v
+		case "coverage":
+			v, _ := strconv.ParseFloat(n.Metadata["coverage"], 64)
+			return v
+		case "heap_allocs":
+			v, _ := strconv.ParseFloat(n.Metadata["heap_allocs"], 64)
+			return v
+		case "stack_allocs":
+			v, _ := strconv.ParseFloat(n.Metadata["stack_allocs"], 64)
+			return v
+		case "bench_ns_op":
+			v, _ := strconv.ParseFloat(n.Metadata["bench_ns_op"], 64)
+			return v
+		case "bench_b_op":
+			v, _ := strconv.ParseFloat(n.Metadata["bench_b_op"], 64)
+			return v
+		case "bench_allocs_op":
+			v, _ := strconv.ParseFloat(n.Metadata["bench_allocs_op"], 64)
+			return v
+		case "pprof_flat_pct":
+			v, _ := strconv.ParseFloat(n.Metadata["pprof_flat_pct"], 64)
+			return v
+		case "pprof_cum_pct":
+			v, _ := strconv.ParseFloat(n.Metadata["pprof_cum_pct"], 64)
+			return v
+		case "line":
+			return float64(n.Line)
+		case "callee_count":
+			// Count callee edges dynamically — not stored in metadata.
+			return float64(0) // handled by string path below
+		}
+		return math.NaN() // fall through to string sort
+	}
+	getString := func(n *graph.Node) string {
+		switch field {
+		case "name":
+			return n.Name
+		case "kind":
+			return string(n.Kind)
+		case "file":
+			return n.File
+		case "id":
+			return n.ID
+		}
+		return n.Metadata[field] // arbitrary metadata key
+	}
+
+	sort.SliceStable(nodes, func(i, j int) bool {
+		fi, fj := getFloat(nodes[i]), getFloat(nodes[j])
+		if !math.IsNaN(fi) && !math.IsNaN(fj) {
+			if ascending {
+				return fi < fj
+			}
+			return fi > fj
+		}
+		si, sj := getString(nodes[i]), getString(nodes[j])
+		if ascending {
+			return si < sj
+		}
+		return si > sj
 	})
 }
 
