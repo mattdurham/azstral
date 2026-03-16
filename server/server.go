@@ -75,6 +75,12 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerHotspotTools(srv, g, root)
 	registerDeleteTools(srv, g)
 	registerImportTools(srv, g)
+	registerCallGraphTools(srv, g)
+	registerFindImplementations(srv, g)
+	registerVetTools(srv, g, root)
+	registerFindTodos(srv, g)
+	registerRefactorTools(srv, g)
+	registerSnapshotTools(srv, g)
 	return srv, nil
 }
 
@@ -1627,6 +1633,24 @@ const toolsReference = `# Azstral Tool Reference
   run_escape(package?, dir?)              — escape analysis; annotates heap_allocs/stack_allocs
   run_bench(package?, bench?, count?)     — go test -bench; annotates bench_ns_op/bench_b_op/bench_allocs_op
   run_profile(package?, bench?, type?)    — pprof profile; returns file path + top-N; annotates pprof_flat_pct
+  run_vet(package?, dir?)                 — go vet; annotates nodes with vet_issues metadata
+  find_todos(pattern?)                    — find TODO/FIXME/HACK/XXX in comments (pattern is pipe-separated)
+
+## Call graph
+
+  call_graph(id, depth?, direction?)      — BFS over call graph; depth default 3; direction: callees|callers|both
+  call_path(from_id, to_id)              — shortest call path between two functions
+
+## Refactor
+
+  move_function(id, target_file_id)       — move function to another file
+  extract_interface(type_id, interface_name, target_file_id?)  — generate interface from concrete type's exported methods
+  find_implementations(interface_id)      — find types that implement an interface
+
+## Graph snapshots
+
+  graph_snapshot(name?)                   — snapshot current node set to memory
+  graph_diff(snapshot_name)              — diff current graph vs snapshot: added/deleted/changed
 
 ## Specs
 
