@@ -37,6 +37,23 @@ const (
 	KindBranch NodeKind = "branch" // break / continue / goto / fallthrough
 	KindLocal  NodeKind = "local"  // local variable, parameter, or named return (from go/types)
 
+	// Sub-kinds for finer-grained statement classification.
+	// These replace the parent kind + metadata["range"]/"op"/"tok" pattern,
+	// enabling direct CEL queries: kind == "for.range", kind == "assign.decl".
+	KindForRange    NodeKind = "for.range"    // for k, v := range x      name=x
+	KindForCond     NodeKind = "for.cond"     // for cond { }             name=cond
+	KindForLoop     NodeKind = "for.loop"     // for init; cond; post { } name=cond
+	KindForBare     NodeKind = "for.bare"     // for { }                  name=""
+	KindAssignDecl  NodeKind = "assign.decl"  // x := expr                name=lhs
+	KindAssignSet   NodeKind = "assign.set"   // x = expr                 name=lhs
+	KindAssignInc   NodeKind = "assign.inc"   // x++                      name=x
+	KindAssignDec   NodeKind = "assign.dec"   // x--                      name=x
+	KindAssignOp    NodeKind = "assign.op"    // x += expr                name=lhs
+	KindBranchBreak    NodeKind = "branch.break"       // break [label]
+	KindBranchContinue NodeKind = "branch.continue"    // continue [label]
+	KindBranchGoto     NodeKind = "branch.goto"        // goto label
+	KindBranchFall     NodeKind = "branch.fallthrough" // fallthrough
+
 	// Expression-level node kinds for fine-grained AST representation.
 	KindCall     NodeKind = "call"     // a call expression: fmt.Println(...)
 	KindSelector NodeKind = "selector" // a selector: fmt.Println (pkg + method)
@@ -94,16 +111,55 @@ type Edge struct {
 
 // Graph holds all nodes and edges.
 type Graph struct {
-	mu    sync.RWMutex
-	Nodes map[string]*Node `json:"nodes"`
-	Edges []*Edge          `json:"edges"`
+	mu      sync.RWMutex
+	Nodes   map[string]*Node `json:"nodes"`
+	Edges   []*Edge          `json:"edges"`
+	fileIdx int
+	fileMap    map[string]string // full fileID → short "f{n}"
+	fileRevMap map[string]string // short "f{n}" → full fileID
 }
 
 // New creates an empty graph.
 func New() *Graph {
 	return &Graph{
-		Nodes: make(map[string]*Node),
+		Nodes:      make(map[string]*Node),
+		fileMap:    make(map[string]string),
+		fileRevMap: make(map[string]string),
 	}
+}
+
+// FileShort returns the short index ("f0", "f1", ...) for a file ID,
+// registering it if this is the first time it is seen.
+// Thread-safe.
+func (g *Graph) FileShort(fileID string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s, ok := g.fileMap[fileID]; ok {
+		return s
+	}
+	s := fmt.Sprintf("f%d", g.fileIdx)
+	g.fileIdx++
+	g.fileMap[fileID] = s
+	g.fileRevMap[s] = fileID
+	return s
+}
+
+// FileFull resolves a short file index back to the full file ID.
+func (g *Graph) FileFull(short string) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.fileRevMap[short]
+}
+
+// FileMap returns a snapshot of the short→full mapping for serialisation.
+func (g *Graph) FileMapping() map[string]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make(map[string]string, len(g.fileRevMap))
+	for k, v := range g.fileRevMap {
+		out[k] = v
+	}
+	return out
 }
 
 // AddNode adds a node to the graph. Returns error if ID already exists.
@@ -182,12 +238,15 @@ func (g *Graph) AddEdge(from, to string, kind EdgeKind) error {
 	return nil
 }
 
-// Reset clears all nodes and edges from the graph.
+// Reset clears all nodes, edges, and the file registry.
 func (g *Graph) Reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.Nodes = make(map[string]*Node)
 	g.Edges = nil
+	g.fileIdx = 0
+	g.fileMap = make(map[string]string)
+	g.fileRevMap = make(map[string]string)
 }
 
 // RenameNode changes a node's ID and name, and updates all edges that reference

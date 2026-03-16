@@ -1474,7 +1474,12 @@ func isStmtNode(kind graph.NodeKind) bool {
 	switch kind {
 	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect,
 		graph.KindReturn, graph.KindDefer, graph.KindGo, graph.KindAssign,
-		graph.KindSend, graph.KindBranch, graph.KindStatement:
+		graph.KindSend, graph.KindBranch, graph.KindStatement,
+		graph.KindForRange, graph.KindForCond, graph.KindForLoop, graph.KindForBare,
+		graph.KindAssignDecl, graph.KindAssignSet, graph.KindAssignOp,
+		graph.KindAssignInc, graph.KindAssignDec,
+		graph.KindBranchBreak, graph.KindBranchContinue,
+		graph.KindBranchGoto, graph.KindBranchFall:
 		return true
 	}
 	return false

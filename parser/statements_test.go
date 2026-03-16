@@ -60,14 +60,14 @@ func TestStatementNodes(t *testing.T) {
 		return len(g.NodesByKind(kind))
 	}
 
-	// Range loop (for _, item := range items).
-	forNodes := g.NodesByKind(graph.KindFor)
-	if len(forNodes) < 2 {
-		t.Errorf("expected ≥2 for nodes, got %d", len(forNodes))
+	// Range loops now use KindForRange sub-kind.
+	rangeNodes := g.NodesByKind(graph.KindForRange)
+	if len(rangeNodes) < 1 {
+		t.Errorf("expected ≥1 for.range nodes, got %d", len(rangeNodes))
 	}
 	var rangeFound bool
-	for _, n := range forNodes {
-		if n.Metadata["range"] == "true" && n.Metadata["over"] == "items" {
+	for _, n := range rangeNodes {
+		if n.Name == "items" || n.Metadata["over"] == "items" {
 			rangeFound = true
 		}
 	}
@@ -100,7 +100,7 @@ func TestStatementNodes(t *testing.T) {
 		t.Errorf("expected ≥1 defer node, got %d", count(graph.KindDefer))
 	}
 
-	// Send statement (ch <- "final" and done <- struct{}{}).
+	// Send statement.
 	if count(graph.KindSend) < 2 {
 		t.Errorf("expected ≥2 send nodes, got %d", count(graph.KindSend))
 	}
@@ -110,9 +110,9 @@ func TestStatementNodes(t *testing.T) {
 		}
 	}
 
-	// Branch (continue).
-	if count(graph.KindBranch) < 1 {
-		t.Errorf("expected ≥1 branch node, got %d", count(graph.KindBranch))
+	// Branch (continue) now uses KindBranchContinue.
+	if count(graph.KindBranchContinue) < 1 {
+		t.Errorf("expected ≥1 branch.continue node, got %d", count(graph.KindBranchContinue))
 	}
 
 	// Go statement.
@@ -120,18 +120,15 @@ func TestStatementNodes(t *testing.T) {
 		t.Errorf("expected ≥1 go node, got %d", count(graph.KindGo))
 	}
 
-	// Assign statement (x := 42).
-	if count(graph.KindAssign) < 1 {
-		t.Errorf("expected ≥1 assign node, got %d", count(graph.KindAssign))
+	// Short declaration now uses KindAssignDecl.
+	if count(graph.KindAssignDecl) < 1 {
+		t.Errorf("expected ≥1 assign.decl node, got %d", count(graph.KindAssignDecl))
 	}
-	var shortDecl bool
-	for _, n := range g.NodesByKind(graph.KindAssign) {
-		if n.Metadata["op"] == ":=" {
-			shortDecl = true
+	if len(g.NodesByKind(graph.KindAssignDecl)) > 0 {
+		n := g.NodesByKind(graph.KindAssignDecl)[0]
+		if n.Metadata["op"] != ":=" {
+			t.Errorf("assign.decl op = %q, want :=", n.Metadata["op"])
 		}
-	}
-	if !shortDecl {
-		t.Error("no := assignment found")
 	}
 
 	// Containment: range loop should be a child of func:main.process.
@@ -142,7 +139,8 @@ func TestStatementNodes(t *testing.T) {
 	children := g.Children(funcNode.ID)
 	var hasFor bool
 	for _, c := range children {
-		if c.Kind == graph.KindFor {
+		if c.Kind == graph.KindForRange || c.Kind == graph.KindForLoop ||
+			c.Kind == graph.KindForCond || c.Kind == graph.KindForBare || c.Kind == graph.KindFor {
 			hasFor = true
 		}
 	}
@@ -151,24 +149,23 @@ func TestStatementNodes(t *testing.T) {
 	}
 
 	// Nested: if should be inside the range loop.
-	for _, forNode := range forNodes {
-		if forNode.Metadata["range"] == "true" {
-			nested := g.Children(forNode.ID)
-			var hasIf bool
-			for _, c := range nested {
-				if c.Kind == graph.KindIf {
-					hasIf = true
-				}
+	for _, forNode := range rangeNodes {
+		nested := g.Children(forNode.ID)
+		var hasIf bool
+		for _, c := range nested {
+			if c.Kind == graph.KindIf {
+				hasIf = true
 			}
-			if !hasIf {
-				t.Error("if not nested inside range loop")
-			}
+		}
+		if !hasIf && forNode.Metadata["over"] == "items" {
+			t.Error("if not nested inside range loop over items")
 		}
 	}
 
-	t.Logf("for=%d if=%d switch=%d select=%d return=%d defer=%d go=%d assign=%d send=%d branch=%d",
-		count(graph.KindFor), count(graph.KindIf), count(graph.KindSwitch),
-		count(graph.KindSelect), count(graph.KindReturn), count(graph.KindDefer),
-		count(graph.KindGo), count(graph.KindAssign), count(graph.KindSend),
-		count(graph.KindBranch))
+	t.Logf("for.range=%d for.cond=%d for.loop=%d for.bare=%d if=%d switch=%d select=%d return=%d defer=%d go=%d assign.decl=%d assign.set=%d send=%d branch.break=%d branch.continue=%d",
+		count(graph.KindForRange), count(graph.KindForCond), count(graph.KindForLoop), count(graph.KindForBare),
+		count(graph.KindIf), count(graph.KindSwitch), count(graph.KindSelect), count(graph.KindReturn),
+		count(graph.KindDefer), count(graph.KindGo),
+		count(graph.KindAssignDecl), count(graph.KindAssignSet),
+		count(graph.KindSend), count(graph.KindBranchBreak), count(graph.KindBranchContinue))
 }

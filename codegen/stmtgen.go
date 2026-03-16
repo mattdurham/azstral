@@ -74,7 +74,8 @@ func renderStmt(g *graph.Graph, n *graph.Node, b *strings.Builder, indent string
 	}
 
 	switch n.Kind {
-	case graph.KindFor:
+	case graph.KindFor,
+		graph.KindForRange, graph.KindForCond, graph.KindForLoop, graph.KindForBare:
 		b.WriteString(indent)
 		b.WriteString(src)
 		b.WriteString(" {\n")
@@ -228,7 +229,13 @@ func isStmtKind(k graph.NodeKind) bool {
 	switch k {
 	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect,
 		graph.KindReturn, graph.KindDefer, graph.KindGo, graph.KindAssign,
-		graph.KindSend, graph.KindBranch, graph.KindStatement:
+		graph.KindSend, graph.KindBranch, graph.KindStatement,
+		// Sub-kinds.
+		graph.KindForRange, graph.KindForCond, graph.KindForLoop, graph.KindForBare,
+		graph.KindAssignDecl, graph.KindAssignSet, graph.KindAssignOp,
+		graph.KindAssignInc, graph.KindAssignDec,
+		graph.KindBranchBreak, graph.KindBranchContinue,
+		graph.KindBranchGoto, graph.KindBranchFall:
 		return true
 	}
 	return false

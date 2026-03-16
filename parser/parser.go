@@ -887,7 +887,8 @@ func addBodyComment(g *graph.Graph, fset *token.FileSet, cg *ast.CommentGroup, f
 
 func isStmtLike(k graph.NodeKind) bool {
 	switch k {
-	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect, graph.KindStatement:
+	case graph.KindFor, graph.KindIf, graph.KindSwitch, graph.KindSelect, graph.KindStatement,
+		graph.KindForRange, graph.KindForCond, graph.KindForLoop, graph.KindForBare:
 		return true
 	}
 	return false

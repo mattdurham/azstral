@@ -137,7 +137,7 @@ func TestExpressionNodes(t *testing.T) {
 	}
 
 	// --- KindAssign: binary child linked from assign node ---
-	assignNodes := g.NodesByKind(graph.KindAssign)
+	assignNodes := g.NodesByKind(graph.KindAssignDecl)
 	var assignHasBinaryChild bool
 	for _, an := range assignNodes {
 		for _, e := range g.EdgesFrom(an.ID) {
@@ -208,7 +208,7 @@ func TestExpressionNodes(t *testing.T) {
 	// Note: "i < len(items)" contains a call — addExpr skips *ast.CallExpr but
 	// still creates the binary wrapping it if the call is not the top-level expr.
 	// The binary node "i < len(items)" is created; the call sub-expr is skipped.
-	forNodes := g.NodesByKind(graph.KindFor)
+	forNodes := g.NodesByKind(graph.KindForLoop)
 	var forHasBinaryChild bool
 	for _, fn := range forNodes {
 		for _, e := range g.EdgesFrom(fn.ID) {

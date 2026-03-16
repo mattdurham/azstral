@@ -11,7 +11,8 @@ import (
 
 // walkStatements recursively parses Go statements into graph nodes.
 // Each statement becomes a child of parentID via EdgeContains.
-// Statement IDs are scoped by file path and source position for global uniqueness.
+// Statement IDs use a short file index ("f0", "f1", ...) registered in the
+// graph's file registry for compact, token-efficient node IDs.
 func walkStatements(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID string, stmts []ast.Stmt) {
 	for _, stmt := range stmts {
 		addStmt(g, fset, src, parentID, fileID, stmt)
@@ -26,23 +27,28 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 	endPos := fset.Position(stmt.End())
 	line, endLine := pos.Line, endPos.Line
 
-	// stmtID encodes kind + file + line for global uniqueness.
+	// Use short file index for compact IDs: "for:f0:16" vs "for:file:/long/path:16".
+	fileShort := g.FileShort(fileID)
+
+	// stmtID encodes kind + short file index + line for global uniqueness.
 	stmtID := func(kind string) string {
-		return fmt.Sprintf("%s:%s:%d", kind, fileID, line)
+		return fmt.Sprintf("%s:%s:%d", kind, fileShort, line)
 	}
 
-	addNode := func(id string, kind graph.NodeKind, text string, meta map[string]string) {
+	addNode := func(id string, kind graph.NodeKind, name string, meta map[string]string) {
 		if meta == nil {
 			meta = map[string]string{}
+		}
+		if name == "" {
+			name = string(kind)
 		}
 		_ = g.AddNode(&graph.Node{
 			ID:       id,
 			Kind:     kind,
-			Name:     string(kind),
+			Name:     name,
 			File:     fileID,
 			Line:     line,
 			EndLine:  endLine,
-			Text:     text,
 			Metadata: meta,
 		})
 		_ = g.AddEdge(parentID, id, graph.EdgeContains)
@@ -51,7 +57,6 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 	switch s := stmt.(type) {
 
 	case *ast.ForStmt:
-		id := stmtID("for")
 		cond := ""
 		if s.Cond != nil {
 			cond = extractText(fset, src, s.Cond.Pos(), s.Cond.End())
@@ -64,16 +69,22 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if s.Post != nil {
 			post = extractText(fset, src, s.Post.Pos(), s.Post.End())
 		}
-		// src = header for codegen reconstruction: "for init; cond; post"
-		header := "for "
-		if init != "" || post != "" {
-			header += init + "; " + cond + "; " + post
-		} else if cond != "" {
-			header += cond
-		} else {
-			header = "for" // bare infinite loop
+		// Sub-kind and name based on loop shape.
+		var subKind graph.NodeKind
+		var header string
+		switch {
+		case init != "" || post != "":
+			subKind = graph.KindForLoop
+			header = "for " + init + "; " + cond + "; " + post
+		case cond != "":
+			subKind = graph.KindForCond
+			header = "for " + cond
+		default:
+			subKind = graph.KindForBare
+			header = "for"
 		}
-		addNode(id, graph.KindFor, "", map[string]string{
+		id := stmtID(string(subKind))
+		addNode(id, subKind, cond, map[string]string{
 			"cond": cond, "init": init, "post": post, "src": header,
 		})
 		if s.Cond != nil {
@@ -84,17 +95,15 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		}
 
 	case *ast.RangeStmt:
-		id := stmtID("for")
-		meta := map[string]string{"range": "true"}
+		id := stmtID(string(graph.KindForRange))
+		over := extractText(fset, src, s.X.Pos(), s.X.End())
+		meta := map[string]string{"over": over}
 		if s.Key != nil {
 			meta["key"] = extractText(fset, src, s.Key.Pos(), s.Key.End())
 		}
 		if s.Value != nil {
 			meta["value"] = extractText(fset, src, s.Value.Pos(), s.Value.End())
 		}
-		over := extractText(fset, src, s.X.Pos(), s.X.End())
-		meta["over"] = over
-		// src = header for codegen: "for key, value := range over"
 		header := "for "
 		if meta["key"] != "" && meta["value"] != "" {
 			header += meta["key"] + ", " + meta["value"] + " := range " + over
@@ -104,7 +113,8 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 			header += "range " + over
 		}
 		meta["src"] = header
-		addNode(id, graph.KindFor, "", meta)
+		// name = what we're ranging over — the most useful single piece
+		addNode(id, graph.KindForRange, over, meta)
 		addExpr(g, fset, src, id, fileID, s.X)
 		if s.Body != nil {
 			walkStatements(g, fset, src, id, fileID, s.Body.List)
@@ -215,7 +225,6 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addClosureOrLeaf(g, fset, src, parentID, fileID, id, graph.KindGo, "go", s.Call, line, endLine, addNode)
 
 	case *ast.AssignStmt:
-		id := stmtID("assign")
 		op := s.Tok.String()
 		var lhsParts []string
 		for _, l := range s.Lhs {
@@ -225,10 +234,22 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		for _, r := range s.Rhs {
 			rhsParts = append(rhsParts, extractText(fset, src, r.Pos(), r.End()))
 		}
-		assignSrc := strings.Join(lhsParts, ", ") + " " + op + " " + strings.Join(rhsParts, ", ")
-		addNode(id, graph.KindAssign, "", map[string]string{
+		lhs := strings.Join(lhsParts, ", ")
+		assignSrc := lhs + " " + op + " " + strings.Join(rhsParts, ", ")
+		// Sub-kind based on operator: := decl, = set, +=/-= op
+		var assignKind graph.NodeKind
+		switch op {
+		case ":=":
+			assignKind = graph.KindAssignDecl
+		case "=":
+			assignKind = graph.KindAssignSet
+		default:
+			assignKind = graph.KindAssignOp
+		}
+		id := stmtID(string(assignKind))
+		addNode(id, assignKind, lhs, map[string]string{
 			"op":  op,
-			"lhs": strings.Join(lhsParts, ", "),
+			"lhs": lhs,
 			"rhs": strings.Join(rhsParts, ", "),
 			"src": assignSrc,
 		})
@@ -252,7 +273,6 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		addExpr(g, fset, src, id, fileID, s.Value)
 
 	case *ast.BranchStmt:
-		id := stmtID("branch")
 		label := ""
 		if s.Label != nil {
 			label = s.Label.Name
@@ -261,7 +281,25 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		if label != "" {
 			branchSrc += " " + label
 		}
-		addNode(id, graph.KindBranch, "", map[string]string{
+		// Sub-kind per token.
+		var branchKind graph.NodeKind
+		switch s.Tok.String() {
+		case "break":
+			branchKind = graph.KindBranchBreak
+		case "continue":
+			branchKind = graph.KindBranchContinue
+		case "goto":
+			branchKind = graph.KindBranchGoto
+		default:
+			branchKind = graph.KindBranchFall
+		}
+		id := stmtID(string(branchKind))
+		// name = label if present, else the token
+		branchName := s.Tok.String()
+		if label != "" {
+			branchName = label
+		}
+		addNode(id, branchKind, branchName, map[string]string{
 			"tok":   s.Tok.String(),
 			"label": label,
 			"src":   branchSrc,
@@ -306,9 +344,15 @@ func addStmt(g *graph.Graph, fset *token.FileSet, src []byte, parentID, fileID s
 		})
 
 	case *ast.IncDecStmt:
-		id := stmtID("assign")
 		lhs := extractText(fset, src, s.X.Pos(), s.X.End())
-		addNode(id, graph.KindAssign, "", map[string]string{
+		var incKind graph.NodeKind
+		if s.Tok.String() == "++" {
+			incKind = graph.KindAssignInc
+		} else {
+			incKind = graph.KindAssignDec
+		}
+		id := stmtID(string(incKind))
+		addNode(id, incKind, lhs, map[string]string{
 			"op":  s.Tok.String(),
 			"lhs": lhs,
 			"src": lhs + s.Tok.String(),
