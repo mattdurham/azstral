@@ -22,6 +22,7 @@ import (
 	"github.com/matt/azstral/query"
 	"github.com/matt/azstral/bench"
 	"github.com/matt/azstral/escape"
+	"github.com/matt/azstral/races"
 	"github.com/matt/azstral/store"
 	"github.com/matt/azstral/testcov"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -76,6 +77,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerEscapeTools(srv, g, root)
 	registerBenchTools(srv, g, root)
 	registerHotspotTools(srv, g, root)
+	registerRaceTools(srv, g)
 	registerDeleteTools(srv, g)
 	registerImportTools(srv, g)
 	registerCallGraphTools(srv, g)
@@ -1442,6 +1444,39 @@ func registerEscapeTools(srv *mcp.Server, g *graph.Graph, root string) {
 				return res.HeapTotal * 100 / res.Total
 			}(),
 		)), nil, nil
+	})
+}
+
+// --- Race and deadlock detection ---
+
+func registerRaceTools(srv *mcp.Server, g *graph.Graph) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "find_races",
+		Description: "Statically analyse the graph for common concurrency anti-patterns. " +
+			"Detects: goroutine loop variable capture (HIGH), mutex Lock without deferred Unlock (MEDIUM), " +
+			"channel sends inside loops (LOW), shared variable accessed from goroutine and main scope " +
+			"without an observable mutex (HIGH). " +
+			"NOTE: heuristic only — use 'go test -race' for definitive race detection. " +
+			"Requires parse_tree to have been called first.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		issues := races.Analyze(g)
+		if len(issues) == 0 {
+			return toolText("no concurrency issues found"), nil, nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "found %d potential concurrency issue(s):\n\n", len(issues))
+		for _, iss := range issues {
+			fmt.Fprintf(&b, "[%s] %s\n", iss.Severity, iss.Kind)
+			if iss.File != "" {
+				file := iss.File
+				if len(file) > 60 {
+					file = "…" + file[len(file)-57:]
+				}
+				fmt.Fprintf(&b, "  %s:%d\n", file, iss.Line)
+			}
+			fmt.Fprintf(&b, "  %s\n\n", iss.Message)
+		}
+		return toolText(strings.TrimSpace(b.String())), nil, nil
 	})
 }
 
