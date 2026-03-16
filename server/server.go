@@ -1085,6 +1085,13 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "tools_help",
+		Description: "Return the complete azstral tool reference — all tools, their parameters, and what they do. Call this first when starting a new session.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		return toolText(toolsReference), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "query_examples",
 		Description: "Return ready-to-use query examples grouped by use case: complexity, call graph, coverage, allocations, structure, vendor, edges.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
@@ -1565,3 +1572,104 @@ func replaceWord(s, oldWord, newWord string) string {
 	re := regexp.MustCompile(`(?m)\b` + regexp.QuoteMeta(oldWord) + `\b`)
 	return re.ReplaceAllString(s, newWord)
 }
+
+// toolsReference is the complete tool reference returned by tools_help.
+const toolsReference = `# Azstral Tool Reference
+
+## Quick start
+
+  tools_help          — this reference
+  query_help          — CEL query field reference
+  query_examples      — ready-to-use query examples
+  ccgf_grammar        — CCGF format spec
+
+## Parse / load
+
+  parse_tree(path?)          — parse a project tree, reset graph. Defaults to working root.
+  parse_files(paths[])       — parse specific files (additive)
+  parse_packages(path?)      — type-check + parse (slower, adds qualified_id + variable dict)
+  reset_graph()              — clear graph and re-parse from root
+
+## Query
+
+  get_graph()                — full graph as JSON
+  get_nodes(ids[])           — fetch nodes by ID, returns CCGF with body text
+  list_nodes(kind?)          — list nodes, optionally by kind
+  list_edges(from?, to?)     — list edges
+  query_nodes(expr)          — CEL expression filter over nodes
+  query_edges(expr)          — CEL expression filter over edges
+  encode_ccgf(scope?,attrs?) — compact structural overview
+
+## Mutate (all sync to disk immediately)
+
+  add_nodes(nodes[])         — add nodes; kind=file creates file, kind=function appends
+  update_nodes(nodes[])      — update nodes; function/type/statement bodies patch file
+  add_edges(edges[])         — add edges
+  delete_edges(edges[])      — remove edges
+  delete_nodes(ids[])        — remove nodes; function/type deletes from file, statement regenerates body
+
+## Structural editing
+
+  add_import(file_id, import_path, alias?)  — add import to file + graph
+  remove_import(file_id, import_path)       — remove import from file + graph
+  rename_symbol(id, new_name)              — rename across codebase (uses go/types when available)
+  find_deadcode(include_exported?)          — unreferenced symbols
+
+## Analysis
+
+  find_hotspots(package?, min_allocs?, top_n?)  — escape analysis + return top alloc functions with body
+  run_tests(package?, run?, dir?)          — go test + coverage; annotates nodes with coverage/test_status
+  run_escape(package?, dir?)              — escape analysis; annotates heap_allocs/stack_allocs
+  run_bench(package?, bench?, count?)     — go test -bench; annotates bench_ns_op/bench_b_op/bench_allocs_op
+  run_profile(package?, bench?, type?)    — pprof profile; returns file path + top-N; annotates pprof_flat_pct
+
+## Specs
+
+  create_spec(id, kind, namespace?, title, body?)
+  get_spec(id)
+  list_specs(kind?, namespace?)
+  link_spec(spec_id, node_id)
+  find_spec(id)
+
+## Docs
+
+  render(id)           — preview a file as Go source (read-only)
+  ccgf_grammar()       — CCGF format definition
+  query_help()         — CEL fields + operators + examples
+  query_examples()     — curated queries by use case
+  tools_help()         — this reference
+
+## Node kinds
+
+  Structural:  package, file, function, type, variable, import, comment, spec
+  Statements:  for, if, switch, select, return, defer, go, assign, send, branch, statement
+  Expressions: expr:binary, expr:unary, expr:ident, expr:selector, expr:index,
+               expr:literal, expr:composite, expr:typeassert, expr:func
+  Variables:   local (from parse_packages — type-checked variable dictionary)
+
+## Node ID format
+
+  pkg:pkgname                         package
+  file:/abs/path/to/file.go           file
+  func:pkgname.Name                   package-level function
+  func:pkgname.RecvType.Name          method
+  type:pkgname.Name                   type
+  var:pkgname.Name                    package-level variable
+  field:pkgname.TypeName.FieldName    struct field
+  for:file:/path:42                   for loop at line 42
+  if:file:/path:45                    if statement
+  assign:file:/path:50               assignment
+  expr:bin:file:/path:45:10          binary expression at line 45 col 10
+  local:pkg.FuncName.varname:15      local variable (parse_packages only)
+
+## CEL query fields (summary — see query_help for full reference)
+
+  kind, name, id, file, line, text, external, parent_id
+  cyclomatic, cognitive                      complexity
+  callee_ids, caller_ids, child_ids          call graph
+  coverage, test_status                      from run_tests
+  heap_allocs, stack_allocs                  from run_escape
+  bench_ns_op, bench_b_op, bench_allocs_op   from run_bench
+  pprof_flat_pct, pprof_cum_pct              from run_profile
+  metadata.num("key")                        any numeric metadata field
+`
