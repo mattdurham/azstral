@@ -8,6 +8,7 @@ package races
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/matt/azstral/graph"
@@ -23,8 +24,9 @@ type Issue struct {
 	Message  string
 }
 
-// Analyze walks the graph looking for concurrency anti-patterns.
-// Returns a list of issues sorted by severity then file/line.
+// Analyze walks the graph looking for concurrency anti-patterns,
+// annotates affected nodes with race_count/race_issues metadata,
+// and returns a list of issues sorted by severity then file/line.
 func Analyze(g *graph.Graph) []Issue {
 	var issues []Issue
 	issues = append(issues, checkGoroutineLoopCapture(g)...)
@@ -43,6 +45,27 @@ func Analyze(g *graph.Graph) []Issue {
 		}
 		return issues[i].Line < issues[j].Line
 	})
+
+	// Annotate affected nodes.
+	byNode := make(map[string][]Issue)
+	for _, iss := range issues {
+		if iss.NodeID != "" {
+			byNode[iss.NodeID] = append(byNode[iss.NodeID], iss)
+		}
+	}
+	for nodeID, nodeIssues := range byNode {
+		var parts []string
+		for _, iss := range nodeIssues {
+			parts = append(parts, iss.Kind+": "+iss.Message)
+		}
+		_ = g.UpdateNode(nodeID, graph.NodePatch{
+			Metadata: map[string]string{
+				"race_count":  strconv.Itoa(len(nodeIssues)),
+				"race_issues": strings.Join(parts, "; "),
+			},
+		})
+	}
+
 	return issues
 }
 

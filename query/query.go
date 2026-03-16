@@ -115,6 +115,10 @@ func nodeEnv() (*cel.Env, error) {
 		cel.Variable("bench_allocs_op", cel.DoubleType),
 		cel.Variable("pprof_flat_pct", cel.DoubleType),
 		cel.Variable("pprof_cum_pct", cel.DoubleType),
+		cel.Variable("lint_count", cel.IntType),
+		cel.Variable("lint_issues", cel.StringType),
+		cel.Variable("race_count", cel.IntType),
+		cel.Variable("race_issues", cel.StringType),
 		// metadata exposes the full key-value map; use .num(key) for numeric lookup.
 		cel.Variable("metadata", cel.MapType(cel.StringType, cel.StringType)),
 		// num(key) parses metadata[key] as float64, returns 0.0 if missing/non-numeric.
@@ -243,6 +247,10 @@ func nodeActivation(g *graph.Graph, n *graph.Node, callerIndex map[string][]stri
 		"bench_allocs_op": metaFloat64(n, "bench_allocs_op"),
 		"pprof_flat_pct":  metaFloat64(n, "pprof_flat_pct"),
 		"pprof_cum_pct":   metaFloat64(n, "pprof_cum_pct"),
+		"lint_count":      metaInt(n, "lint_count"),
+		"lint_issues":     n.Metadata["lint_issues"],
+		"race_count":      metaInt(n, "race_count"),
+		"race_issues":     n.Metadata["race_issues"],
 		"metadata":        metadataMap(n),
 	}
 }
@@ -387,6 +395,33 @@ const Examples = `# Query Examples
 
   # Labelled breaks (complex flow)
   kind == "branch" && metadata["label"] != ""
+
+## Lint (requires run_lint)
+
+  # Any lint issue
+  lint_count > 0
+
+  # Specific linter
+  lint_issues.contains("errcheck")
+  lint_issues.contains("gosec")
+
+  # Lint + complexity combined
+  kind == "function" && lint_count > 0 && cyclomatic > 10
+
+  # Top 10 most linted functions
+  # query_nodes expr="lint_count > 0" sort_by="lint_count" top_n=10
+
+## Concurrency (requires find_races)
+
+  # Any race or deadlock pattern
+  race_count > 0
+
+  # Specific pattern
+  race_issues.contains("goroutine_loop_capture")
+  race_issues.contains("mutex_no_defer_unlock")
+
+  # Race + no test coverage
+  race_count > 0 && test_status == "untested"
 
 ## Sorting and ranking (sort_by, top_n, bottom_n)
 
@@ -551,6 +586,10 @@ const Help = `# CEL Graph Query Language
   bench_ns_op     float   nanoseconds per op (from run_bench)
   bench_b_op      float   bytes allocated per op (from run_bench)
   bench_allocs_op float   heap allocations per op (from run_bench)
+  lint_count      int     number of golangci-lint issues (from run_lint)
+  lint_issues     string  semicolon-separated "linter: message" list (from run_lint)
+  race_count      int     number of concurrency issues (from find_races)
+  race_issues     string  semicolon-separated issue descriptions (from find_races)
 
 ## Edge query variables
 

@@ -22,6 +22,7 @@ import (
 	"github.com/matt/azstral/query"
 	"github.com/matt/azstral/bench"
 	"github.com/matt/azstral/escape"
+	"github.com/matt/azstral/lint"
 	"github.com/matt/azstral/races"
 	"github.com/matt/azstral/store"
 	"github.com/matt/azstral/testcov"
@@ -78,6 +79,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerBenchTools(srv, g, root)
 	registerHotspotTools(srv, g, root)
 	registerRaceTools(srv, g)
+	registerLintTools(srv, g, root)
 	registerDeleteTools(srv, g)
 	registerImportTools(srv, g)
 	registerCallGraphTools(srv, g)
@@ -1444,6 +1446,47 @@ func registerEscapeTools(srv *mcp.Server, g *graph.Graph, root string) {
 				return res.HeapTotal * 100 / res.Total
 			}(),
 		)), nil, nil
+	})
+}
+
+// --- Lint tools ---
+
+func registerLintTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type runLintInput struct {
+		Package string `json:"package,omitempty" jsonschema:"package pattern, e.g. './...' or './internal/executor'. Defaults to './...'"`
+		Dir     string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_lint",
+		Description: "Run golangci-lint and annotate function nodes with findings. " +
+			"Uses .golangci.yml if present, otherwise runs a curated set of linters. " +
+			"After calling this, query_nodes supports: " +
+			"lint_count (int) — number of issues on this node; " +
+			"lint_issues (string) — semicolon-separated 'linter: message' list. " +
+			"Requires golangci-lint to be installed.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input runLintInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		res, err := lint.Run(g, dir, input.Package)
+		if err != nil {
+			return toolError(fmt.Sprintf("lint: %v", err)), nil, nil
+		}
+		if res.Total == 0 {
+			return toolText("no lint issues found"), nil, nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "found %d issue(s) from linters: %s\n", res.Total, strings.Join(res.Linters, ", "))
+		fmt.Fprintf(&b, "annotated %d function node(s)\n", len(res.ByNode))
+		b.WriteString("Query with: lint_count > 0  or  lint_issues.contains(\"errcheck\")")
+		return toolText(b.String()), nil, nil
 	})
 }
 
