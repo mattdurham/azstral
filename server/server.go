@@ -80,6 +80,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerHotspotTools(srv, g, root)
 	registerRaceTools(srv, g)
 	registerLintTools(srv, g, root)
+	registerAnalysisTools(srv, g, root)
 	registerDeleteTools(srv, g)
 	registerImportTools(srv, g)
 	registerCallGraphTools(srv, g)
@@ -1520,6 +1521,101 @@ func registerRaceTools(srv *mcp.Server, g *graph.Graph) {
 			fmt.Fprintf(&b, "  %s\n\n", iss.Message)
 		}
 		return toolText(strings.TrimSpace(b.String())), nil, nil
+	})
+}
+
+// --- Combined analysis ---
+
+func registerAnalysisTools(srv *mcp.Server, g *graph.Graph, root string) {
+	type runAllInput struct {
+		Package string `json:"package,omitempty" jsonschema:"package pattern. Defaults to './...'"`
+		Dir     string `json:"dir,omitempty" jsonschema:"working directory. Defaults to working root."`
+		Tests   bool   `json:"tests,omitempty" jsonschema:"run go test with coverage (slow). Default false."`
+		Bench   string `json:"bench,omitempty" jsonschema:"benchmark name regex to run (e.g. 'BenchmarkFoo'). Empty skips benchmarks."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "run_analysis",
+		Description: "Run all static analysis in one call: escape analysis, golangci-lint, " +
+			"and concurrency pattern detection. Optionally also runs tests and benchmarks. " +
+			"Annotates nodes so you can query: " +
+			"lint_count, lint_issues, race_count, race_issues, heap_allocs, " +
+			"coverage, test_status, bench_allocs_op. " +
+			"Returns a summary with the riskiest functions.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input runAllInput) (*mcp.CallToolResult, any, error) {
+		dir := input.Dir
+		if dir == "" {
+			dir = root
+		}
+		if dir == "" {
+			return toolError("dir is required (no working root configured)"), nil, nil
+		}
+
+		var b strings.Builder
+		var totalIssues int
+
+		// 1. Escape analysis.
+		b.WriteString("## Escape analysis\n")
+		escRes, err := escape.Run(g, dir, input.Package)
+		if err != nil {
+			fmt.Fprintf(&b, "  warning: %v\n", err)
+		} else {
+			fmt.Fprintf(&b, "  %d total allocations, %d heap\n", escRes.Total, escRes.HeapTotal)
+			totalIssues += escRes.HeapTotal
+		}
+
+		// 2. Lint.
+		b.WriteString("## Lint\n")
+		lintRes, err := lint.Run(g, dir, input.Package)
+		if err != nil {
+			fmt.Fprintf(&b, "  warning: %v\n", err)
+		} else {
+			fmt.Fprintf(&b, "  %d issue(s) from: %s\n", lintRes.Total, strings.Join(lintRes.Linters, ", "))
+			totalIssues += lintRes.Total
+		}
+
+		// 3. Race detection.
+		b.WriteString("## Concurrency patterns\n")
+		raceIssues := races.Analyze(g)
+		fmt.Fprintf(&b, "  %d issue(s) found\n", len(raceIssues))
+		totalIssues += len(raceIssues)
+		for _, iss := range raceIssues {
+			if iss.Severity == "HIGH" {
+				fmt.Fprintf(&b, "  [HIGH] %s: %s\n", iss.Kind, iss.Message)
+			}
+		}
+
+		// 4. Tests (optional).
+		if input.Tests {
+			b.WriteString("## Tests\n")
+			testRes, err := testcov.Run(g, dir, input.Package, "")
+			if err != nil {
+				fmt.Fprintf(&b, "  warning: %v\n", err)
+			} else {
+				fmt.Fprintf(&b, "  %d passed, %d failed — %.1f%% coverage\n",
+					testRes.Passed, testRes.Failed, testRes.Coverage)
+				totalIssues += testRes.Failed
+			}
+		}
+
+		// 5. Benchmarks (optional).
+		if input.Bench != "" {
+			b.WriteString("## Benchmarks\n")
+			benchRes, err := bench.Run(g, dir, input.Package, input.Bench, 1)
+			if err != nil {
+				fmt.Fprintf(&b, "  warning: %v\n", err)
+			} else {
+				fmt.Fprintf(&b, "  %d benchmark(s) annotated\n", len(benchRes.Results))
+			}
+		}
+
+		// Summary: top risky functions across all dimensions.
+		b.WriteString("\n## Top risk functions\n")
+		b.WriteString("Query: query_nodes expr=\"lint_count > 0 || race_count > 0 || heap_allocs > 3\" sort_by=\"lint_count\" top_n=10\n")
+		fmt.Fprintf(&b, "\nTotal issues across all analyses: %d\n", totalIssues)
+		b.WriteString("All nodes annotated — use query_nodes to explore.\n")
+
+		return toolText(b.String()), nil, nil
 	})
 }
 
