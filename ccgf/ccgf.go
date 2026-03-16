@@ -56,8 +56,8 @@ type Options struct {
 
 // sym is an internal representation of a CCGF symbol.
 type sym struct {
-	id     string     // short id: s0, s1, ...
-	nodeID string     // original graph node ID
+	id     string     // full graph node ID (e.g. func:parser.ParseFile)
+	nodeID string     // same as id — kept for compatibility
 	code   string     // CCGF type code: p, f, m, t, i, v, c
 	name   string     // qualified name: pkg.Symbol
 	vendor bool       // external dependency
@@ -67,8 +67,8 @@ type sym struct {
 // ccgfEdge is an internal edge representation.
 type ccgfEdge struct {
 	code string // d, c, u, r, m, etc.
-	from string // short id
-	to   string // short id
+	from string // full node ID
+	to   string // full node ID
 }
 
 type encoder struct {
@@ -77,7 +77,6 @@ type encoder struct {
 	syms   []*sym
 	byNode map[string]*sym   // graph nodeID → sym
 	pkgOf  map[string]string // graph nodeID → package name (cached)
-	n      int               // id counter
 }
 
 // Encode serializes a graph into CCGF text.
@@ -92,11 +91,6 @@ func Encode(g *graph.Graph, opts Options) string {
 	return e.emit()
 }
 
-func (e *encoder) nextID() string {
-	id := fmt.Sprintf("s%d", e.n)
-	e.n++
-	return id
-}
 
 // packageOf walks contains edges upward to find the package name for a node.
 func (e *encoder) packageOf(nodeID string) string {
@@ -337,7 +331,7 @@ func (e *encoder) collect() {
 			continue
 		}
 		s := &sym{
-			id:     e.nextID(),
+			id:     n.ID,
 			nodeID: n.ID,
 			code:   tc,
 			name:   e.qualifiedName(n),
