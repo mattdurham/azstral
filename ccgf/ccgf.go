@@ -6,10 +6,10 @@
 //
 // Format:
 //
-//	# ccgf1 scope=program vendor=surface
+//	# ccgf2 scope=program vendor=surface
 //	s <id> <type> <name> [V]
+//	  key value
 //	<edge> <from> <to>
-//	a <id> <key> <value>
 package ccgf
 
 import (
@@ -48,6 +48,10 @@ type Options struct {
 
 	// Module is the Go module path, shown in the header.
 	Module string
+
+	// Root is the file path prefix to strip from loc values.
+	// When set, "file:/home/user/project/pkg/foo.go" becomes "pkg/foo.go".
+	Root string
 }
 
 // sym is an internal representation of a CCGF symbol.
@@ -129,8 +133,8 @@ func (e *encoder) packageOf(nodeID string) string {
 	return ""
 }
 
-// typeCode maps a graph node to its CCGF symbol type code.
-func typeCode(n *graph.Node) string {
+// NodeTypeCode maps a graph node to its CCGF symbol type code.
+func NodeTypeCode(n *graph.Node) string {
 	switch n.Kind {
 	case graph.KindPackage:
 		return "p"
@@ -328,7 +332,7 @@ func (e *encoder) collect() {
 
 	// Assign short IDs.
 	for _, n := range included {
-		tc := typeCode(n)
+		tc := NodeTypeCode(n)
 		if tc == "" {
 			continue
 		}
@@ -593,6 +597,17 @@ func (e *encoder) collectEdges() []ccgfEdge {
 	return edges
 }
 
+// abbrevLoc strips the Root prefix from a file path for compact display.
+// If root is empty or the path does not start with root, returns filepath.Base(path).
+func abbrevLoc(path, root string) string {
+	if root != "" {
+		if rel, ok := strings.CutPrefix(path, root); ok && rel != "" {
+			return rel
+		}
+	}
+	return filepath.Base(path)
+}
+
 // emit produces the final CCGF text.
 func (e *encoder) emit() string {
 	var b strings.Builder
@@ -606,19 +621,61 @@ func (e *encoder) emit() string {
 	if e.opts.Vendor == VendorInclude {
 		vendorStr = "include"
 	}
-	fmt.Fprintf(&b, "# ccgf1 scope=%s vendor=%s", scope, vendorStr)
+	fmt.Fprintf(&b, "# ccgf2 scope=%s vendor=%s", scope, vendorStr)
 	if e.opts.Module != "" {
 		fmt.Fprintf(&b, " mod=%s", e.opts.Module)
 	}
 	b.WriteByte('\n')
 
-	// Symbol definitions.
+	// Symbol definitions with immediately-following indented attributes.
 	for _, s := range e.syms {
 		fmt.Fprintf(&b, "s %s %s %s", s.id, s.code, s.name)
 		if s.vendor {
 			b.WriteString(" V")
 		}
 		b.WriteByte('\n')
+
+		// Semantic attributes (always emitted).
+		if doc := e.docComment(s.nodeID); doc != "" {
+			fmt.Fprintf(&b, "  doc %s\n", doc)
+		}
+		if specs := e.specIDs(s.nodeID); specs != "" {
+			fmt.Fprintf(&b, "  specs %s\n", specs)
+		}
+		for _, key := range e.directiveKeys(s.nodeID) {
+			fmt.Fprintf(&b, "  %s %s\n", key, s.node.Metadata[key])
+		}
+
+		// Structural attributes (optional via Attrs flag).
+		if e.opts.Attrs {
+			n := s.node
+			if n.File != "" {
+				loc := abbrevLoc(n.File, e.opts.Root)
+				if n.Line > 0 {
+					loc = fmt.Sprintf("%s:%d", loc, n.Line)
+				}
+				fmt.Fprintf(&b, "  loc %s\n", loc)
+			}
+			if sig := buildSig(n); sig != "" {
+				fmt.Fprintf(&b, "  sig %s\n", sig)
+			}
+			if n.Kind == graph.KindType {
+				kind := "struct"
+				if strings.Contains(n.Text, "interface") {
+					kind = "interface"
+				}
+				fmt.Fprintf(&b, "  kind %s\n", kind)
+			}
+			if s.vendor {
+				fmt.Fprintf(&b, "  ro 1\n")
+			}
+			if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
+				fmt.Fprintf(&b, "  cyclo %s\n", cyc)
+			}
+			if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
+				fmt.Fprintf(&b, "  cogn %s\n", cog)
+			}
+		}
 	}
 
 	// Edges.
@@ -627,71 +684,6 @@ func (e *encoder) emit() string {
 		b.WriteByte('\n')
 		for _, edge := range edges {
 			fmt.Fprintf(&b, "%s %s %s\n", edge.code, edge.from, edge.to)
-		}
-	}
-
-	// Semantic attributes: doc comments, spec IDs, and directives (always emitted).
-	var semAttrs []string
-	for _, s := range e.syms {
-		if doc := e.docComment(s.nodeID); doc != "" {
-			semAttrs = append(semAttrs, fmt.Sprintf("a %s doc %s", s.id, doc))
-		}
-		if specs := e.specIDs(s.nodeID); specs != "" {
-			semAttrs = append(semAttrs, fmt.Sprintf("a %s specs %s", s.id, specs))
-		}
-		// Emit go: directives from node metadata.
-		for _, key := range e.directiveKeys(s.nodeID) {
-			n := s.node
-			semAttrs = append(semAttrs, fmt.Sprintf("a %s %s %s", s.id, key, n.Metadata[key]))
-		}
-	}
-	if len(semAttrs) > 0 {
-		b.WriteByte('\n')
-		for _, a := range semAttrs {
-			b.WriteString(a)
-			b.WriteByte('\n')
-		}
-	}
-
-	// Structural attributes (optional via Attrs flag).
-	if e.opts.Attrs {
-		var attrs []string
-		for _, s := range e.syms {
-			n := s.node
-			if n.File != "" {
-				loc := filepath.Base(n.File)
-				if n.Line > 0 {
-					loc = fmt.Sprintf("%s:%d", loc, n.Line)
-				}
-				attrs = append(attrs, fmt.Sprintf("a %s loc %s", s.id, loc))
-			}
-			if sig := buildSig(n); sig != "" {
-				attrs = append(attrs, fmt.Sprintf("a %s sig %s", s.id, sig))
-			}
-			if n.Kind == graph.KindType {
-				kind := "struct"
-				if strings.Contains(n.Text, "interface") {
-					kind = "interface"
-				}
-				attrs = append(attrs, fmt.Sprintf("a %s kind %s", s.id, kind))
-			}
-			if s.vendor {
-				attrs = append(attrs, fmt.Sprintf("a %s ro 1", s.id))
-			}
-			// Complexity metrics for functions.
-			if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
-				attrs = append(attrs, fmt.Sprintf("a %s cyclo %s", s.id, cyc))
-			}
-			if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
-				attrs = append(attrs, fmt.Sprintf("a %s cogn %s", s.id, cog))
-			}
-		}
-		if len(attrs) > 0 {
-			b.WriteByte('\n')
-			for _, a := range attrs {
-				b.WriteString(a)
-				b.WriteByte('\n')
-			}
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/matt/azstral/graph"
@@ -237,6 +238,86 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+func TestListNodesCCGF(t *testing.T) {
+	session := setupTestServer(t)
+	helloPath := findHelloMain(t)
+	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
+
+	text := callTool(t, session, "list_nodes", map[string]any{"kind": "function"})
+
+	// Must not be JSON array.
+	if strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("list_nodes must return CCGF lines, not JSON:\n%s", text)
+	}
+	// Must contain s-line format.
+	if !strings.Contains(text, "s func:") {
+		t.Errorf("list_nodes must contain CCGF s-lines:\n%s", text)
+	}
+	// Must contain #idx suffix.
+	if !strings.Contains(text, " #") {
+		t.Errorf("list_nodes must contain #idx on s-lines:\n%s", text)
+	}
+	t.Logf("list_nodes output:\n%s", text)
+}
+
+func TestQueryNodesCCGF(t *testing.T) {
+	session := setupTestServer(t)
+	helloPath := findHelloMain(t)
+	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
+
+	text := callTool(t, session, "query_nodes", map[string]any{
+		"expr": `kind == "function"`,
+	})
+
+	// Must not be JSON.
+	if strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("query_nodes must return CCGF, not JSON:\n%s", text)
+	}
+	// Each node block starts with an s-line.
+	if !strings.Contains(text, "s func:") {
+		t.Errorf("query_nodes must contain s-lines:\n%s", text)
+	}
+	// Must have indented attributes (loc, sig).
+	if !strings.Contains(text, "\n  loc ") && !strings.Contains(text, "\n  sig ") {
+		t.Errorf("query_nodes must have indented attributes:\n%s", text)
+	}
+	t.Logf("query_nodes output:\n%s", text)
+}
+
+func TestFindDeadcodeCCGF(t *testing.T) {
+	session := setupTestServer(t)
+
+	// Build a graph with an unused function.
+	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
+		{"id": "pkg:main", "kind": "package", "name": "main"},
+		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
+		{"id": "func:main", "kind": "function", "name": "main", "line": 5,
+			"file": "file:main.go", "metadata": map[string]any{"params": "", "returns": ""}},
+		{"id": "func:unused", "kind": "function", "name": "unused", "line": 10,
+			"file": "file:main.go", "metadata": map[string]any{"params": "", "returns": ""}},
+	}})
+	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
+		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
+		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
+		{"from": "file:main.go", "to": "func:unused", "kind": "contains"},
+	}})
+
+	text := callTool(t, session, "find_deadcode", map[string]any{"include_exported": true})
+
+	// Must not be JSON.
+	if strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("find_deadcode must return text lines, not JSON:\n%s", text)
+	}
+	// Must contain dead line format.
+	if !strings.Contains(text, "dead ") {
+		t.Errorf("find_deadcode must contain 'dead' lines:\n%s", text)
+	}
+	if !strings.Contains(text, "unused") {
+		t.Errorf("find_deadcode must list the unused function:\n%s", text)
+	}
+	t.Logf("find_deadcode output:\n%s", text)
 }
 
 func findHelloMain(t *testing.T) string {
