@@ -388,6 +388,26 @@ const Examples = `# Query Examples
   # Labelled breaks (complex flow)
   kind == "branch" && metadata["label"] != ""
 
+## Sorting and ranking (sort_by, top_n, bottom_n)
+
+  # Top 10 most complex functions
+  query_nodes  expr="kind == \"function\" && !external"  sort_by="cyclomatic"  top_n=10
+
+  # 5 functions with worst test coverage (requires run_tests)
+  query_nodes  expr="kind == \"function\" && coverage > 0"  sort_by="coverage"  bottom_n=5
+
+  # Top 20 allocating functions (requires run_bench or run_escape)
+  query_nodes  expr="bench_allocs_op > 0"  sort_by="bench_allocs_op"  top_n=20
+
+  # Most-called functions (hot paths)
+  query_nodes  expr="kind == \"function\" && !external"  sort_by="caller_count"  top_n=10
+
+  # Highest heap escape pressure (requires run_escape)
+  query_nodes  expr="heap_allocs > 0"  sort_by="heap_allocs"  top_n=15
+
+  # Slowest benchmarks (requires run_bench)
+  query_nodes  expr="bench_ns_op > 0"  sort_by="bench_ns_op"  top_n=10
+
 ## Allocation hotspots — fast workflow
 
   # Single call: escape analysis + rank + return body text ready for editing
