@@ -176,11 +176,7 @@ func RenderFile(g *graph.Graph, st *store.Store, fileID string) (string, error) 
 				b.WriteString(tp)
 			}
 			b.WriteString(" ")
-			if node.Text != "" {
-				b.WriteString(node.Text)
-			} else {
-				b.WriteString("struct{}")
-			}
+			renderTypeBody(g, node, &b)
 			b.WriteString("\n")
 
 		case graph.KindVariable:
@@ -200,7 +196,11 @@ func RenderFile(g *graph.Graph, st *store.Store, fileID string) (string, error) 
 					b.WriteString(" ")
 					b.WriteString(typeName)
 				}
-				if node.Text != "" {
+				// Initializer: look for a KindExpr* child, fall back to node.Text.
+				if initVal := renderVarInitializer(g, node); initVal != "" {
+					b.WriteString(" = ")
+					b.WriteString(initVal)
+				} else if node.Text != "" {
 					b.WriteString(" = ")
 					b.WriteString(node.Text)
 				}
@@ -233,8 +233,8 @@ func RenderFile(g *graph.Graph, st *store.Store, fileID string) (string, error) 
 			b.WriteString(" {\n")
 
 			// Function body: statement tree if available, Text for manually-built nodes.
-			body, ok := RenderBody(g, node.ID)
-			if !ok {
+			body, _ := RenderBody(g, node.ID)
+			if body == "" {
 				body = node.Text
 			}
 			for _, line := range strings.Split(body, "\n") {
@@ -337,4 +337,166 @@ func findPackageName(g *graph.Graph, fileID string) string {
 func pathBase(importPath string) string {
 	parts := strings.Split(importPath, "/")
 	return parts[len(parts)-1]
+}
+
+// renderTypeBody emits the type body for a KindType node.
+// It uses type_kind metadata to decide whether to emit struct, interface, or alias.
+func renderTypeBody(g *graph.Graph, node *graph.Node, b *strings.Builder) {
+	typeKind := node.Metadata["type_kind"]
+
+	switch typeKind {
+	case "alias":
+		aliasType := node.Metadata["alias_type"]
+		if aliasType == "" {
+			// Fallback: use Text if alias_type not set (backward compat).
+			aliasType = node.Text
+		}
+		if aliasType == "" {
+			aliasType = "interface{}"
+		}
+		b.WriteString(aliasType)
+
+	case "interface":
+		// Collect interface method children (KindFunction with metadata["interface"] set).
+		children := g.Children(node.ID)
+		var methods []*graph.Node
+		for _, c := range children {
+			if c.Kind == graph.KindFunction && c.Metadata["interface"] != "" {
+				methods = append(methods, c)
+			}
+		}
+		// Sort by line.
+		sort.Slice(methods, func(i, j int) bool {
+			return methods[i].Line < methods[j].Line
+		})
+		b.WriteString("interface {")
+		if len(methods) == 0 {
+			b.WriteString("}")
+			return
+		}
+		b.WriteString("\n")
+		for _, m := range methods {
+			if m.Metadata["interface_embed"] == "true" {
+				// Embedded interface: just the type name.
+				b.WriteString("\t")
+				b.WriteString(m.Metadata["sig"])
+				b.WriteString("\n")
+			} else {
+				b.WriteString("\t")
+				b.WriteString(m.Name)
+				b.WriteString(m.Metadata["sig"])
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("}")
+
+	default:
+		// "struct" or unset (backward compat: fall back to Text).
+		if node.Text != "" && typeKind == "" {
+			b.WriteString(node.Text)
+			return
+		}
+		// Collect field children (KindVariable with metadata["field"] set).
+		children := g.Children(node.ID)
+		var fields []*graph.Node
+		for _, c := range children {
+			if c.Kind == graph.KindVariable && c.Metadata["field"] == "true" {
+				fields = append(fields, c)
+			}
+		}
+		// Sort by line.
+		sort.Slice(fields, func(i, j int) bool {
+			return fields[i].Line < fields[j].Line
+		})
+		b.WriteString("struct {")
+		if len(fields) == 0 {
+			b.WriteString("}")
+			return
+		}
+		b.WriteString("\n")
+		// Group consecutive fields at the same line (multi-name fields like `width, height float64`).
+		type fieldGroup struct {
+			names   []string
+			typ     string
+			tag     string
+			raw     string
+			line    int
+		}
+		var groups []fieldGroup
+		for _, f := range fields {
+			if f.Metadata["embedded"] == "true" {
+				groups = append(groups, fieldGroup{
+					names: nil,
+					typ:   f.Metadata["type"],
+					tag:   f.Metadata["tag"],
+					raw:   f.Metadata["raw"],
+					line:  f.Line,
+				})
+				continue
+			}
+			// If same line as previous group, append name (multi-name field).
+			// Multi-name fields share the same raw text, so the first one already has it.
+			if len(groups) > 0 && groups[len(groups)-1].line == f.Line && groups[len(groups)-1].names != nil {
+				groups[len(groups)-1].names = append(groups[len(groups)-1].names, f.Name)
+			} else {
+				groups = append(groups, fieldGroup{
+					names: []string{f.Name},
+					typ:   f.Metadata["type"],
+					tag:   f.Metadata["tag"],
+					raw:   f.Metadata["raw"],
+					line:  f.Line,
+				})
+			}
+		}
+		for _, grp := range groups {
+			b.WriteString("\t")
+			if grp.raw != "" {
+				// Use raw source text to preserve alignment.
+				b.WriteString(grp.raw)
+			} else if grp.names == nil {
+				// Embedded field.
+				b.WriteString(grp.typ)
+				if grp.tag != "" {
+					b.WriteString(" `")
+					b.WriteString(grp.tag)
+					b.WriteString("`")
+				}
+			} else {
+				b.WriteString(strings.Join(grp.names, ", "))
+				b.WriteString(" ")
+				b.WriteString(grp.typ)
+				if grp.tag != "" {
+					b.WriteString(" `")
+					b.WriteString(grp.tag)
+					b.WriteString("`")
+				}
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("}")
+	}
+}
+
+// renderVarInitializer returns the initializer text for a KindVariable node
+// by looking for a KindExpr* child and returning its "src" metadata.
+func renderVarInitializer(g *graph.Graph, node *graph.Node) string {
+	for _, c := range g.Children(node.ID) {
+		if isExprKind(c.Kind) {
+			if src := c.Metadata["src"]; src != "" {
+				return src
+			}
+		}
+	}
+	return ""
+}
+
+// isExprKind returns true for expression node kinds.
+func isExprKind(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindExprBinary, graph.KindExprUnary, graph.KindExprIdent,
+		graph.KindExprSelector, graph.KindExprIndex, graph.KindExprLiteral,
+		graph.KindExprComposite, graph.KindExprTypeAssert, graph.KindExprFunc:
+		return true
+	}
+	return false
 }

@@ -295,6 +295,31 @@ func addFunction(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgNam
 		walkStatements(g, fset, src, funcID, fileID, decl.Body.List)
 	}
 }
+// ParseFuncBody parses a function body text (without braces) as statement
+// children under funcID in the graph. It is used by add_nodes in the server
+// to populate statement children when a KindFunction node is added with a
+// non-empty text body and no existing statement children.
+// fileID is the file the function belongs to (for node file attribution).
+func ParseFuncBody(g *graph.Graph, funcID, fileID, bodyText string) error {
+	// Wrap the body in a minimal parseable function.
+	wrapped := "package p\nfunc _() {\n" + bodyText + "\n}\n"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", wrapped, 0)
+	if err != nil {
+		return fmt.Errorf("parse body: %w", err)
+	}
+	if len(f.Decls) == 0 {
+		return nil
+	}
+	fd, ok := f.Decls[0].(*ast.FuncDecl)
+	if !ok || fd.Body == nil {
+		return nil
+	}
+	src := []byte(wrapped)
+	walkStatements(g, fset, src, funcID, fileID, fd.Body.List)
+	return nil
+}
+
 func ParseTree(g *graph.Graph, root string) (int, error) {
 	var count int
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -508,12 +533,21 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 			pos := fset.Position(s.Pos())
 			endPos := fset.Position(s.End())
 			typeID := fmt.Sprintf("type:%s.%s", pkgName, s.Name.Name)
-			typeText := extractText(fset, src, s.Type.Pos(), s.Type.End())
 			typeMeta := map[string]string{
 				"package": pkgName,
 			}
 			if s.TypeParams != nil {
 				typeMeta["type_params"] = extractText(fset, src, s.TypeParams.Pos(), s.TypeParams.End())
+			}
+			// Determine type_kind and set alias_type for non-struct/non-interface.
+			switch s.Type.(type) {
+			case *ast.StructType:
+				typeMeta["type_kind"] = "struct"
+			case *ast.InterfaceType:
+				typeMeta["type_kind"] = "interface"
+			default:
+				typeMeta["type_kind"] = "alias"
+				typeMeta["alias_type"] = extractText(fset, src, s.Type.Pos(), s.Type.End())
 			}
 			if err := g.AddNode(&graph.Node{
 				ID:       typeID,
@@ -522,7 +556,6 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 				File:     fileID,
 				Line:     pos.Line,
 				EndLine:  endPos.Line,
-				Text:     typeText,
 				Metadata: typeMeta,
 			}); err != nil {
 				if existing, ok := g.GetNode(typeID); ok && existing.File != fileID {
@@ -537,20 +570,44 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 				if t.Fields != nil {
 					for _, field := range t.Fields.List {
 						fieldType := extractText(fset, src, field.Type.Pos(), field.Type.End())
+						tagStr := ""
+						if field.Tag != nil {
+							// Strip surrounding backticks from raw tag literal.
+							tagStr = strings.Trim(field.Tag.Value, "`")
+						}
+						// Compute raw field text from source: from first name (or type for embedded)
+						// to end of field (tag or type), stripping leading tab.
+						fieldEnd := field.Type.End()
+						if field.Tag != nil {
+							fieldEnd = field.Tag.End()
+						}
+						fieldStart := field.Type.Pos()
+						if len(field.Names) > 0 {
+							fieldStart = field.Names[0].Pos()
+						}
+						rawField := strings.TrimLeft(extractText(fset, src, fieldStart, fieldEnd), "\t")
+
 						for _, name := range field.Names {
 							fieldPos := fset.Position(name.Pos())
 							fieldID := fmt.Sprintf("field:%s.%s.%s", pkgName, s.Name.Name, name.Name)
+							fieldMeta := map[string]string{
+								"field":   "true",
+								"type":    fieldType,
+								"package": pkgName,
+							}
+							if tagStr != "" {
+								fieldMeta["tag"] = tagStr
+							}
+							// Store raw field text for exact reconstruction (preserves alignment).
+							// Only set on the first name — subsequent names at the same line share the group.
+							fieldMeta["raw"] = rawField
 							_ = g.AddNode(&graph.Node{
 								ID:   fieldID,
 								Kind: graph.KindVariable,
 								Name: name.Name,
 								File: fileID,
 								Line: fieldPos.Line,
-								Metadata: map[string]string{
-									"field":   "true",
-									"type":    fieldType,
-									"package": pkgName,
-								},
+								Metadata: fieldMeta,
 							})
 							_ = g.AddEdge(typeID, fieldID, graph.EdgeContains)
 						}
@@ -559,18 +616,23 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 							embedName := types2str(field.Type)
 							embedPos := fset.Position(field.Type.Pos())
 							fieldID := fmt.Sprintf("field:%s.%s.%s", pkgName, s.Name.Name, embedName)
+							fieldMeta := map[string]string{
+								"field":    "true",
+								"embedded": "true",
+								"type":     fieldType,
+								"package":  pkgName,
+								"raw":      rawField,
+							}
+							if tagStr != "" {
+								fieldMeta["tag"] = tagStr
+							}
 							_ = g.AddNode(&graph.Node{
 								ID:   fieldID,
 								Kind: graph.KindVariable,
 								Name: embedName,
 								File: fileID,
 								Line: embedPos.Line,
-								Metadata: map[string]string{
-									"field":    "true",
-									"embedded": "true",
-									"type":     fieldType,
-									"package":  pkgName,
-								},
+								Metadata: fieldMeta,
 							})
 							_ = g.AddEdge(typeID, fieldID, graph.EdgeContains)
 						}
@@ -597,6 +659,26 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 							})
 							_ = g.AddEdge(typeID, methodID, graph.EdgeContains)
 						}
+						// Embedded interface (anonymous method, no names).
+						if len(method.Names) == 0 {
+							embedType := extractText(fset, src, method.Type.Pos(), method.Type.End())
+							embedPos := fset.Position(method.Type.Pos())
+							embedID := fmt.Sprintf("func:%s.%s.embed:%s", pkgName, s.Name.Name, embedType)
+							_ = g.AddNode(&graph.Node{
+								ID:   embedID,
+								Kind: graph.KindFunction,
+								Name: embedType,
+								File: fileID,
+								Line: embedPos.Line,
+								Metadata: map[string]string{
+									"interface":         s.Name.Name,
+									"interface_embed":   "true",
+									"sig":               embedType,
+									"package":           pkgName,
+								},
+							})
+							_ = g.AddEdge(typeID, embedID, graph.EdgeContains)
+						}
 					}
 				}
 			}
@@ -616,17 +698,12 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 			for i, name := range s.Names {
 				pos := fset.Position(name.Pos())
 				varID := fmt.Sprintf("var:%s.%s", pkgName, name.Name)
-				valueText := ""
-				if i < len(s.Values) {
-					valueText = extractText(fset, src, s.Values[i].Pos(), s.Values[i].End())
-				}
 				if err := g.AddNode(&graph.Node{
 					ID:       varID,
 					Kind:     graph.KindVariable,
 					Name:     name.Name,
 					File:     fileID,
 					Line:     pos.Line,
-					Text:     valueText,
 					Metadata: meta,
 				}); err != nil {
 					if existing, ok := g.GetNode(varID); ok && existing.File != fileID {
@@ -634,6 +711,26 @@ func addGenDecl(g *graph.Graph, fset *token.FileSet, src []byte, fileID, pkgName
 					}
 				}
 				_ = g.AddEdge(fileID, varID, graph.EdgeContains)
+				// Add expression child for initializer value (if present).
+				// Use a simple KindExprLiteral node to store the raw initializer text
+				// so codegen can reconstruct "= <value>" without storing it in node.Text.
+				if i < len(s.Values) {
+					valExpr := s.Values[i]
+					valSrc := extractText(fset, src, valExpr.Pos(), valExpr.End())
+					valPos := fset.Position(valExpr.Pos())
+					initID := fmt.Sprintf("init:%s:%d", varID, valPos.Line)
+					_ = g.AddNode(&graph.Node{
+						ID:   initID,
+						Kind: graph.KindExprLiteral,
+						Name: truncate(valSrc, 60),
+						File: fileID,
+						Line: valPos.Line,
+						Metadata: map[string]string{
+							"src": valSrc,
+						},
+					})
+					_ = g.AddEdge(varID, initID, graph.EdgeContains)
+				}
 			}
 		}
 	}

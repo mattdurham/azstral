@@ -280,6 +280,17 @@ func registerMutationTools(srv *mcp.Server, g *graph.Graph) {
 			}
 		case graph.KindFunction:
 			if n.File != "" && n.Text != "" {
+				// Auto-parse text body into statement children if none exist yet.
+				hasStmts := false
+				for _, c := range g.Children(n.ID) {
+					if isStmtNode(c.Kind) {
+						hasStmts = true
+						break
+					}
+				}
+				if !hasStmts {
+					_ = parser.ParseFuncBody(g, n.ID, n.File, n.Text)
+				}
 				filePath := strings.TrimPrefix(n.File, "file:")
 				if err := edit.AppendFunction(filePath, n.Name, n.Metadata["receiver"],
 					n.Metadata["params"], n.Metadata["returns"], n.Text); err != nil {
@@ -881,7 +892,7 @@ func toolNode(n *graph.Node, graphs ...*graph.Graph) *mcp.CallToolResult {
 			typeCode = "f"
 		}
 	case graph.KindType:
-		if strings.Contains(n.Text, "interface") {
+		if n.Metadata["type_kind"] == "interface" || strings.Contains(n.Text, "interface") {
 			typeCode = "i"
 		} else {
 			typeCode = "t"
