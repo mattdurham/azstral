@@ -188,25 +188,40 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 	})
 
 	type getNodesInput struct {
-		IDs []string `json:"ids" jsonschema:"array of node IDs to retrieve"`
+		IDs  []string `json:"ids,omitempty"  jsonschema:"node IDs to retrieve (strings like \"func:main.Parse\")"`
+		Idxs []int    `json:"idxs,omitempty" jsonschema:"integer node indices to retrieve — shorter than full IDs (e.g. [1, 42, 87])"`
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "get_nodes",
-		Description: "Return multiple graph nodes by ID in a single call. Returns CCGF lines for each found node.",
+		Name: "get_nodes",
+		Description: "Return graph nodes by ID or integer index. " +
+			"Use ids for known string IDs, idxs for the compact integers shown in query results. " +
+			"Both can be combined in one call. Returns CCGF lines for each found node.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input getNodesInput) (*mcp.CallToolResult, any, error) {
 		var b strings.Builder
 		var missing []string
+
+		writeNode := func(node *graph.Node) {
+			r := toolNode(node, g)
+			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
+			b.WriteString("\n\n")
+		}
+
 		for _, id := range input.IDs {
 			node, ok := g.GetNode(id)
 			if !ok {
 				missing = append(missing, id)
 				continue
 			}
-			// Reuse toolNode's text but concatenate all.
-			r := toolNode(node)
-			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
-			b.WriteString("\n\n")
+			writeNode(node)
+		}
+		for _, idx := range input.Idxs {
+			node := g.NodeByIdx(idx)
+			if node == nil {
+				missing = append(missing, fmt.Sprintf("#%d", idx))
+				continue
+			}
+			writeNode(node)
 		}
 		if len(missing) > 0 {
 			fmt.Fprintf(&b, "not found: %s", strings.Join(missing, ", "))
@@ -849,7 +864,7 @@ func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 
 // toolNode renders a single graph node as CCGF text using the node's own ID
 // as the symbol identifier. Output uses the same format as encode_ccgf.
-func toolNode(n *graph.Node) *mcp.CallToolResult {
+func toolNode(n *graph.Node, graphs ...*graph.Graph) *mcp.CallToolResult {
 	if n == nil {
 		return toolError("node is nil")
 	}
@@ -880,6 +895,12 @@ func toolNode(n *graph.Node) *mcp.CallToolResult {
 	id := n.ID
 	var b strings.Builder
 	fmt.Fprintf(&b, "s %s %s %s\n", id, typeCode, n.Name)
+	// Emit the integer index so callers can use get_nodes(idxs=[N]) instead of full IDs.
+	if len(graphs) > 0 && graphs[0] != nil {
+		if idx := graphs[0].NodeIdx(id); idx > 0 {
+			fmt.Fprintf(&b, "a %s idx %d\n", id, idx)
+		}
+	}
 
 	// Attributes.
 	if n.File != "" {
@@ -1060,7 +1081,16 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 		if len(nodes) == 0 {
 			return toolText("no matches"), nil, nil
 		}
-		return toolJSON(nodes), nil, nil
+		// Include integer idx on each node so callers can use get_nodes(idxs=[...]).
+		type nodeWithIdx struct {
+			*graph.Node
+			Idx int `json:"idx,omitempty"`
+		}
+		enriched := make([]nodeWithIdx, len(nodes))
+		for i, n := range nodes {
+			enriched[i] = nodeWithIdx{Node: n, Idx: g.NodeIdx(n.ID)}
+		}
+		return toolJSON(enriched), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -1333,7 +1363,7 @@ func registerHotspotTools(srv *mcp.Server, g *graph.Graph, root string) {
 		fmt.Fprintf(&b, "# %d hotspot functions (escape analysis: %d total, %d heap)\n\n",
 			len(entries), res.Total, res.HeapTotal)
 		for _, e := range entries {
-			r := toolNode(e.n)
+			r := toolNode(e.n, g)
 			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
 			fmt.Fprintf(&b, "\na %s heap_allocs %d\n\n", e.n.ID, e.heaps)
 		}

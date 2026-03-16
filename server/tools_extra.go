@@ -142,7 +142,7 @@ func registerCallGraphTools(srv *mcp.Server, g *graph.Graph) {
 			if !ok {
 				continue
 			}
-			r := toolNode(node)
+			r := toolNode(node, g)
 			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
 			fmt.Fprintf(&b, "\na %s depth %d\n\n", e.id, e.depth)
 		}
@@ -307,7 +307,7 @@ func registerFindImplementations(srv *mcp.Server, g *graph.Graph) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "# %d implementation(s) of %s\n\n", len(matches), ifaceNode.Name)
 		for _, n := range matches {
-			r := toolNode(n)
+			r := toolNode(n, g)
 			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
 			b.WriteString("\n\n")
 		}
@@ -720,7 +720,7 @@ func registerRefactorTools(srv *mcp.Server, g *graph.Graph) {
 		}
 		_ = g.AddEdge(targetFileID, ifaceID, graph.EdgeContains)
 
-		r := toolNode(ifaceNode)
+		r := toolNode(ifaceNode, g)
 		return toolText(fmt.Sprintf("extracted interface %s from %s\n\n%s",
 			input.InterfaceName, typeNode.Name, r.Content[0].(*mcp.TextContent).Text)), nil, nil
 	})

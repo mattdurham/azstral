@@ -117,6 +117,9 @@ type Graph struct {
 	fileIdx int
 	fileMap    map[string]string // full fileID → short "f{n}"
 	fileRevMap map[string]string // short "f{n}" → full fileID
+	nodeIdx    int
+	nodeToIdx  map[string]int // nodeID → integer
+	idxToNode  []string       // integer → nodeID (index 0 unused; idx starts at 1)
 }
 
 // New creates an empty graph.
@@ -125,6 +128,8 @@ func New() *Graph {
 		Nodes:      make(map[string]*Node),
 		fileMap:    make(map[string]string),
 		fileRevMap: make(map[string]string),
+		nodeToIdx:  make(map[string]int),
+		idxToNode:  []string{""},  // slot 0 unused; valid indices start at 1
 	}
 }
 
@@ -163,6 +168,7 @@ func (g *Graph) FileMapping() map[string]string {
 }
 
 // AddNode adds a node to the graph. Returns error if ID already exists.
+// Each new node is assigned a globally unique integer index (starting at 1).
 func (g *Graph) AddNode(n *Node) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -170,7 +176,27 @@ func (g *Graph) AddNode(n *Node) error {
 		return fmt.Errorf("node %q already exists", n.ID)
 	}
 	g.Nodes[n.ID] = n
+	g.nodeIdx++
+	g.nodeToIdx[n.ID] = g.nodeIdx
+	g.idxToNode = append(g.idxToNode, n.ID)
 	return nil
+}
+
+// NodeIdx returns the integer index for a node ID, or 0 if not found.
+func (g *Graph) NodeIdx(id string) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.nodeToIdx[id]
+}
+
+// NodeByIdx returns the node for a given integer index, or nil.
+func (g *Graph) NodeByIdx(idx int) *Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if idx < 1 || idx >= len(g.idxToNode) {
+		return nil
+	}
+	return g.Nodes[g.idxToNode[idx]]
 }
 
 // UpdateNode applies non-zero fields from the patch to an existing node.
@@ -238,7 +264,7 @@ func (g *Graph) AddEdge(from, to string, kind EdgeKind) error {
 	return nil
 }
 
-// Reset clears all nodes, edges, and the file registry.
+// Reset clears all nodes, edges, and all registries.
 func (g *Graph) Reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -247,6 +273,9 @@ func (g *Graph) Reset() {
 	g.fileIdx = 0
 	g.fileMap = make(map[string]string)
 	g.fileRevMap = make(map[string]string)
+	g.nodeIdx = 0
+	g.nodeToIdx = make(map[string]int)
+	g.idxToNode = []string{""}
 }
 
 // RenameNode changes a node's ID and name, and updates all edges that reference
