@@ -84,7 +84,7 @@ func TestEncodeBasic(t *testing.T) {
 	out := Encode(g, Options{Module: "test"})
 
 	// Header.
-	if !strings.HasPrefix(out, "# ccgf1 scope=program vendor=surface mod=test\n") {
+	if !strings.HasPrefix(out, "# ccgf2 scope=program vendor=surface mod=test\n") {
 		t.Errorf("bad header:\n%s", out)
 	}
 
@@ -182,16 +182,13 @@ func TestEncodeAttrs(t *testing.T) {
 	g := buildTestGraph()
 	out := Encode(g, Options{Attrs: true})
 
-	if !strings.Contains(out, "a ") {
-		t.Errorf("missing attributes:\n%s", out)
-	}
-	if !strings.Contains(out, " loc main.go:") {
+	if !strings.Contains(out, "  loc main.go:") {
 		t.Errorf("missing loc attribute:\n%s", out)
 	}
-	if !strings.Contains(out, " sig func(") {
+	if !strings.Contains(out, "  sig func(") {
 		t.Errorf("missing sig attribute:\n%s", out)
 	}
-	if !strings.Contains(out, " ro 1") {
+	if !strings.Contains(out, "  ro 1") {
 		t.Errorf("missing ro attribute for vendor:\n%s", out)
 	}
 
@@ -240,4 +237,66 @@ func TestEncodeSpecIDs(t *testing.T) {
 		t.Errorf("missing specs attribute:\n%s", out)
 	}
 	t.Logf("output:\n%s", out)
+}
+
+func TestEncodeAttrsIndented(t *testing.T) {
+	g := buildTestGraph()
+	out := Encode(g, Options{Attrs: true})
+
+	// Attributes must use indented format, not 'a <id> key val'.
+	if strings.Contains(out, "\na ") {
+		t.Errorf("output must not contain 'a ' attribute prefix lines:\n%s", out)
+	}
+
+	// Attributes must appear as two-space-indented lines.
+	if !strings.Contains(out, "\n  loc ") {
+		t.Errorf("loc attribute must be indented:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  sig ") {
+		t.Errorf("sig attribute must be indented:\n%s", out)
+	}
+	t.Logf("output:\n%s", out)
+}
+
+func TestEncodeDocIndented(t *testing.T) {
+	g := buildTestGraph()
+	out := Encode(g, Options{})
+
+	// Semantic attributes (doc, specs) must also be indented.
+	if strings.Contains(out, "\na ") {
+		t.Errorf("output must not contain 'a ' attribute prefix lines:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  doc ") {
+		t.Errorf("doc attribute must be indented:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  specs ") {
+		t.Errorf("specs attribute must be indented:\n%s", out)
+	}
+}
+
+func TestEncodeRootPathAbbreviation(t *testing.T) {
+	// Build a fresh graph with absolute file paths to test root prefix stripping.
+	g2 := graph.New()
+	g2.AddNode(&graph.Node{
+		ID: "pkg:mypkg", Kind: graph.KindPackage, Name: "mypkg",
+	})
+	g2.AddNode(&graph.Node{
+		ID: "file:/home/user/project/mypkg/foo.go", Kind: graph.KindFile,
+		Name: "foo.go", File: "file:/home/user/project/mypkg/foo.go",
+	})
+	g2.AddEdge("pkg:mypkg", "file:/home/user/project/mypkg/foo.go", graph.EdgeContains)
+	g2.AddNode(&graph.Node{
+		ID: "func:mypkg.Foo", Kind: graph.KindFunction, Name: "Foo",
+		File: "file:/home/user/project/mypkg/foo.go", Line: 5,
+		Metadata: map[string]string{"params": "", "returns": ""},
+	})
+	g2.AddEdge("file:/home/user/project/mypkg/foo.go", "func:mypkg.Foo", graph.EdgeContains)
+
+	out := Encode(g2, Options{Attrs: true, Root: "file:/home/user/project/"})
+	if !strings.Contains(out, "  loc mypkg/foo.go:5") {
+		t.Errorf("expected abbreviated loc, got:\n%s", out)
+	}
+	if strings.Contains(out, "/home/user/project") {
+		t.Errorf("root prefix should be stripped from loc:\n%s", out)
+	}
 }

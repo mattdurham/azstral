@@ -67,12 +67,12 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	)
 
 	registerParseTools(srv, g, root)
-	registerQueryTools(srv, g)
+	registerQueryTools(srv, g, root)
 	registerMutationTools(srv, g)
 	registerSpecTools(srv, g, st)
 	registerCodegenTools(srv, g, st)
-	registerCCGFTools(srv, g)
-	registerCELTools(srv, g)
+	registerCCGFTools(srv, g, root)
+	registerCELTools(srv, g, root)
 	registerGraphTools(srv, g, root)
 	registerTestTools(srv, g, root)
 	registerEscapeTools(srv, g, root)
@@ -187,7 +187,7 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
 }
 
 // --- Query tools ---
-func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
+func registerQueryTools(srv *mcp.Server, g *graph.Graph, root string) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_graph",
 		Description: "Return the full code graph as JSON.",
@@ -210,7 +210,7 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 		var missing []string
 
 		writeNode := func(node *graph.Node) {
-			r := toolNode(node, g)
+			r := toolNode(node, root, g)
 			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
 			b.WriteString("\n\n")
 		}
@@ -239,12 +239,33 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_nodes",
-		Description: "List graph nodes, optionally filtered by kind.",
+		Description: "List graph nodes, optionally filtered by kind. Returns compact CCGF s-lines with #idx.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input listNodesInput) (*mcp.CallToolResult, any, error) {
+		var nodes []*graph.Node
 		if input.Kind != "" {
-			return toolJSON(g.NodesByKind(graph.NodeKind(input.Kind))), nil, nil
+			nodes = g.NodesByKind(graph.NodeKind(input.Kind))
+		} else {
+			for _, n := range g.Nodes {
+				nodes = append(nodes, n)
+			}
 		}
-		return toolJSON(g.Nodes), nil, nil
+		sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+		if len(nodes) == 0 {
+			return toolText("no nodes"), nil, nil
+		}
+		var b strings.Builder
+		for _, n := range nodes {
+			tc := ccgf.NodeTypeCode(n)
+			if tc == "" {
+				tc = "?"
+			}
+			idxStr := ""
+			if idx := g.NodeIdx(n.ID); idx > 0 {
+				idxStr = fmt.Sprintf(" #%d", idx)
+			}
+			fmt.Fprintf(&b, "s %s %s %s%s\n", n.ID, tc, n.Name, idxStr)
+		}
+		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -881,9 +902,26 @@ func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 
 // --- Helpers ---
 
+// abbrevPath strips the working root prefix from a file path.
+// Falls back to the base filename if root is empty or path has no match.
+func abbrevPath(path, root string) string {
+	if root != "" {
+		if rel, ok := strings.CutPrefix(path, root); ok && rel != "" {
+			return rel
+		}
+		// Also try stripping "file:" prefix from path, then root.
+		if trimmed, ok2 := strings.CutPrefix(path, "file:"); ok2 {
+			if rel, ok3 := strings.CutPrefix(trimmed, strings.TrimPrefix(root, "file:")); ok3 && rel != "" {
+				return rel
+			}
+		}
+	}
+	return filepath.Base(path)
+}
+
 // toolNode renders a single graph node as CCGF text using the node's own ID
 // as the symbol identifier. Output uses the same format as encode_ccgf.
-func toolNode(n *graph.Node, graphs ...*graph.Graph) *mcp.CallToolResult {
+func toolNode(n *graph.Node, root string, graphs ...*graph.Graph) *mcp.CallToolResult {
 	if n == nil {
 		return toolError("node is nil")
 	}
@@ -913,33 +951,35 @@ func toolNode(n *graph.Node, graphs ...*graph.Graph) *mcp.CallToolResult {
 
 	id := n.ID
 	var b strings.Builder
-	fmt.Fprintf(&b, "s %s %s %s\n", id, typeCode, n.Name)
-	// Emit the integer index so callers can use get_nodes(idxs=[N]) instead of full IDs.
+
+	// s-line: include #idx suffix if graph is available.
+	idxSuffix := ""
 	if len(graphs) > 0 && graphs[0] != nil {
 		if idx := graphs[0].NodeIdx(id); idx > 0 {
-			fmt.Fprintf(&b, "a %s idx %d\n", id, idx)
+			idxSuffix = fmt.Sprintf(" #%d", idx)
 		}
 	}
+	fmt.Fprintf(&b, "s %s %s %s%s\n", id, typeCode, n.Name, idxSuffix)
 
-	// Attributes.
+	// Indented attributes.
 	if n.File != "" {
-		loc := n.File
+		loc := abbrevPath(n.File, root)
 		if n.Line > 0 {
-			loc = fmt.Sprintf("%s:%d", n.File, n.Line)
+			loc = fmt.Sprintf("%s:%d", loc, n.Line)
 		}
-		fmt.Fprintf(&b, "a %s loc %s\n", id, loc)
+		fmt.Fprintf(&b, "  loc %s\n", loc)
 	}
 	if sig := buildNodeSig(n); sig != "" {
-		fmt.Fprintf(&b, "a %s sig %s\n", id, sig)
+		fmt.Fprintf(&b, "  sig %s\n", sig)
 	}
 	if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
-		fmt.Fprintf(&b, "a %s cyclo %s\n", id, cyc)
+		fmt.Fprintf(&b, "  cyclo %s\n", cyc)
 	}
 	if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
-		fmt.Fprintf(&b, "a %s cogn %s\n", id, cog)
+		fmt.Fprintf(&b, "  cogn %s\n", cog)
 	}
 	if n.Metadata["external"] == "true" {
-		fmt.Fprintf(&b, "a %s ro 1\n", id)
+		fmt.Fprintf(&b, "  ro 1\n")
 	}
 	// Include body text for content-bearing nodes (functions, types, variables, comments).
 	// Statement nodes (for, if, switch, etc.) use metadata instead.
@@ -947,11 +987,25 @@ func toolNode(n *graph.Node, graphs ...*graph.Graph) *mcp.CallToolResult {
 	case graph.KindFunction, graph.KindType, graph.KindVariable, graph.KindComment:
 		if n.Text != "" {
 			escaped := strings.ReplaceAll(n.Text, "\n", "\\n")
-			fmt.Fprintf(&b, "a %s text %s\n", id, escaped)
+			fmt.Fprintf(&b, "  text %s\n", escaped)
 		}
 	}
 
 	return toolText(strings.TrimRight(b.String(), "\n"))
+}
+
+// deadKindCode maps a graph.NodeKind string to a CCGF type code for dead code output.
+func deadKindCode(kind string) string {
+	switch graph.NodeKind(kind) {
+	case graph.KindFunction:
+		return "f"
+	case graph.KindType:
+		return "t"
+	case graph.KindVariable:
+		return "v"
+	default:
+		return "?"
+	}
 }
 
 func buildNodeSig(n *graph.Node) string {
@@ -1018,7 +1072,7 @@ func toolJSON(v any) *mcp.CallToolResult {
 }
 
 // --- CCGF tools ---
-func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
+func registerCCGFTools(srv *mcp.Server, g *graph.Graph, root string) {
 	type ccgfInput struct {
 		Scope  string `json:"scope,omitempty" jsonschema:"scope: 'program' (default), 'file:<id>' for single file, 'type:<id>' for single type and its methods"`
 		Vendor string `json:"vendor,omitempty" jsonschema:"vendor mode: 'surface' (default, 1 layer of API used), 'include' (full vendor tree)"`
@@ -1038,6 +1092,7 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 			Scope:  input.Scope,
 			Attrs:  input.Attrs,
 			Module: input.Module,
+			Root:   root,
 		}
 		switch strings.ToLower(input.Vendor) {
 		case "include":
@@ -1070,13 +1125,32 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph) {
 		if len(dead) == 0 {
 			return toolText("no dead code found"), nil, nil
 		}
-		return toolJSON(dead), nil, nil
+		var b strings.Builder
+		for _, d := range dead {
+			var kindCode string
+			if n, ok := g.GetNode(d.ID); ok {
+				kindCode = ccgf.NodeTypeCode(n)
+			}
+			if kindCode == "" {
+				kindCode = deadKindCode(d.Kind)
+			}
+			if d.File != "" {
+				loc := abbrevPath(d.File, root)
+				if d.Line > 0 {
+					loc = fmt.Sprintf("%s:%d", loc, d.Line)
+				}
+				fmt.Fprintf(&b, "dead %s %s %s\n", kindCode, d.Name, loc)
+			} else {
+				fmt.Fprintf(&b, "dead %s %s\n", kindCode, d.Name)
+			}
+		}
+		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
 	})
 }
 
 // --- CEL query tools ---
 
-func registerCELTools(srv *mcp.Server, g *graph.Graph) {
+func registerCELTools(srv *mcp.Server, g *graph.Graph, root string) {
 	type celInput struct {
 		Expr   string `json:"expr" jsonschema:"CEL expression to evaluate against each node or edge. Call query_help for available fields and examples."`
 		SortBy string `json:"sort_by,omitempty" jsonschema:"field to sort results by (e.g. cyclomatic, cognitive, coverage, heap_allocs, bench_ns_op, name, line). Numeric fields sort descending by default."`
@@ -1118,16 +1192,16 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph) {
 			nodes = nodes[len(nodes)-input.BottomN:]
 		}
 
-		// Include integer idx on each node so callers can use get_nodes(idxs=[...]).
-		type nodeWithIdx struct {
-			*graph.Node
-			Idx int `json:"idx,omitempty"`
-		}
-		enriched := make([]nodeWithIdx, len(nodes))
+		var b strings.Builder
 		for i, n := range nodes {
-			enriched[i] = nodeWithIdx{Node: n, Idx: g.NodeIdx(n.ID)}
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			r := toolNode(n, root, g)
+			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
+			b.WriteByte('\n')
 		}
-		return toolJSON(enriched), nil, nil
+		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -1400,9 +1474,9 @@ func registerHotspotTools(srv *mcp.Server, g *graph.Graph, root string) {
 		fmt.Fprintf(&b, "# %d hotspot functions (escape analysis: %d total, %d heap)\n\n",
 			len(entries), res.Total, res.HeapTotal)
 		for _, e := range entries {
-			r := toolNode(e.n, g)
+			r := toolNode(e.n, root, g)
 			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
-			fmt.Fprintf(&b, "\na %s heap_allocs %d\n\n", e.n.ID, e.heaps)
+			fmt.Fprintf(&b, "  heap_allocs %d\n\n", e.heaps)
 		}
 		return toolText(strings.TrimSpace(b.String())), nil, nil
 	})
