@@ -240,29 +240,23 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
-func TestListNodesCCGF(t *testing.T) {
+func TestListNodesJSON(t *testing.T) {
 	session := setupTestServer(t)
 	helloPath := findHelloMain(t)
 	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
 
 	text := callTool(t, session, "list_nodes", map[string]any{"kind": "function"})
 
-	// Must not be JSON array.
-	if strings.HasPrefix(strings.TrimSpace(text), "[") {
-		t.Errorf("list_nodes must return CCGF lines, not JSON:\n%s", text)
+	if !strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("list_nodes must return JSON array:\n%s", text)
 	}
-	// Must contain s-line format.
-	if !strings.Contains(text, "s func:") {
-		t.Errorf("list_nodes must contain CCGF s-lines:\n%s", text)
-	}
-	// Must contain #idx suffix.
-	if !strings.Contains(text, " #") {
-		t.Errorf("list_nodes must contain #idx on s-lines:\n%s", text)
+	if !strings.Contains(text, `"id"`) {
+		t.Errorf("list_nodes JSON must contain id field:\n%s", text)
 	}
 	t.Logf("list_nodes output:\n%s", text)
 }
 
-func TestQueryNodesCCGF(t *testing.T) {
+func TestQueryNodesJSON(t *testing.T) {
 	session := setupTestServer(t)
 	helloPath := findHelloMain(t)
 	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
@@ -271,25 +265,18 @@ func TestQueryNodesCCGF(t *testing.T) {
 		"expr": `kind == "function"`,
 	})
 
-	// Must not be JSON.
-	if strings.HasPrefix(strings.TrimSpace(text), "[") {
-		t.Errorf("query_nodes must return CCGF, not JSON:\n%s", text)
+	if !strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("query_nodes must return JSON array:\n%s", text)
 	}
-	// Each node block starts with an s-line.
-	if !strings.Contains(text, "s func:") {
-		t.Errorf("query_nodes must contain s-lines:\n%s", text)
-	}
-	// Must have indented attributes (loc, sig).
-	if !strings.Contains(text, "\n  loc ") && !strings.Contains(text, "\n  sig ") {
-		t.Errorf("query_nodes must have indented attributes:\n%s", text)
+	if !strings.Contains(text, `"id"`) || !strings.Contains(text, `"kind"`) {
+		t.Errorf("query_nodes JSON must contain id and kind fields:\n%s", text)
 	}
 	t.Logf("query_nodes output:\n%s", text)
 }
 
-func TestFindDeadcodeCCGF(t *testing.T) {
+func TestFindDeadcodeJSON(t *testing.T) {
 	session := setupTestServer(t)
 
-	// Build a graph with an unused function.
 	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
 		{"id": "pkg:main", "kind": "package", "name": "main"},
 		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
@@ -306,13 +293,8 @@ func TestFindDeadcodeCCGF(t *testing.T) {
 
 	text := callTool(t, session, "find_deadcode", map[string]any{"include_exported": true})
 
-	// Must not be JSON.
-	if strings.HasPrefix(strings.TrimSpace(text), "[") {
-		t.Errorf("find_deadcode must return text lines, not JSON:\n%s", text)
-	}
-	// Must contain dead line format.
-	if !strings.Contains(text, "dead ") {
-		t.Errorf("find_deadcode must contain 'dead' lines:\n%s", text)
+	if !strings.HasPrefix(strings.TrimSpace(text), "[") {
+		t.Errorf("find_deadcode must return JSON array:\n%s", text)
 	}
 	if !strings.Contains(text, "unused") {
 		t.Errorf("find_deadcode must list the unused function:\n%s", text)

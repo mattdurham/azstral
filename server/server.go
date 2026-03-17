@@ -45,9 +45,10 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	if root != "" {
 		n, perr := parser.ParseTree(g, root)
 		if perr != nil {
-			return nil, fmt.Errorf("parse root %s: %w", root, perr)
+			parseMsg = fmt.Sprintf(" Warning: partial parse of %s (%d files loaded, error: %v).", root, n, perr)
+		} else {
+			parseMsg = fmt.Sprintf(" Parsed %d files from %s.", n, root)
 		}
-		parseMsg = fmt.Sprintf(" Parsed %d files from %s.", n, root)
 	}
 
 	instructions := "Azstral represents Go code as a connected graph. " +
@@ -239,7 +240,7 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph, root string) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_nodes",
-		Description: "List graph nodes, optionally filtered by kind. Returns compact CCGF s-lines with #idx.",
+		Description: "List graph nodes, optionally filtered by kind.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input listNodesInput) (*mcp.CallToolResult, any, error) {
 		var nodes []*graph.Node
 		if input.Kind != "" {
@@ -253,19 +254,7 @@ func registerQueryTools(srv *mcp.Server, g *graph.Graph, root string) {
 		if len(nodes) == 0 {
 			return toolText("no nodes"), nil, nil
 		}
-		var b strings.Builder
-		for _, n := range nodes {
-			tc := ccgf.NodeTypeCode(n)
-			if tc == "" {
-				tc = "?"
-			}
-			idxStr := ""
-			if idx := g.NodeIdx(n.ID); idx > 0 {
-				idxStr = fmt.Sprintf(" #%d", idx)
-			}
-			fmt.Fprintf(&b, "s %s %s %s%s\n", n.ID, tc, n.Name, idxStr)
-		}
-		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
+		return toolJSON(nodes), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -919,79 +908,20 @@ func abbrevPath(path, root string) string {
 	return filepath.Base(path)
 }
 
-// toolNode renders a single graph node as CCGF text using the node's own ID
-// as the symbol identifier. Output uses the same format as encode_ccgf.
-func toolNode(n *graph.Node, root string, graphs ...*graph.Graph) *mcp.CallToolResult {
+// toolNode renders a single graph node as JSON.
+func toolNode(n *graph.Node, _ string, graphs ...*graph.Graph) *mcp.CallToolResult {
 	if n == nil {
 		return toolError("node is nil")
 	}
-
-	// Map kind to CCGF type code.
-	typeCode := "v"
-	switch n.Kind {
-	case graph.KindPackage:
-		typeCode = "p"
-	case graph.KindFunction:
-		if n.Metadata["receiver"] != "" {
-			typeCode = "m"
-		} else {
-			typeCode = "f"
-		}
-	case graph.KindType:
-		if n.Metadata["type_kind"] == "interface" || strings.Contains(n.Text, "interface") {
-			typeCode = "i"
-		} else {
-			typeCode = "t"
-		}
-	case graph.KindVariable:
-		if n.Metadata["const"] == "true" {
-			typeCode = "c"
-		}
+	type nodeOut struct {
+		*graph.Node
+		Idx int `json:"idx,omitempty"`
 	}
-
-	id := n.ID
-	var b strings.Builder
-
-	// s-line: include #idx suffix if graph is available.
-	idxSuffix := ""
+	out := nodeOut{Node: n}
 	if len(graphs) > 0 && graphs[0] != nil {
-		if idx := graphs[0].NodeIdx(id); idx > 0 {
-			idxSuffix = fmt.Sprintf(" #%d", idx)
-		}
+		out.Idx = graphs[0].NodeIdx(n.ID)
 	}
-	fmt.Fprintf(&b, "s %s %s %s%s\n", id, typeCode, n.Name, idxSuffix)
-
-	// Indented attributes.
-	if n.File != "" {
-		loc := abbrevPath(n.File, root)
-		if n.Line > 0 {
-			loc = fmt.Sprintf("%s:%d", loc, n.Line)
-		}
-		fmt.Fprintf(&b, "  loc %s\n", loc)
-	}
-	if sig := buildNodeSig(n); sig != "" {
-		fmt.Fprintf(&b, "  sig %s\n", sig)
-	}
-	if cyc := n.Metadata["cyclomatic"]; cyc != "" && cyc != "0" && cyc != "1" {
-		fmt.Fprintf(&b, "  cyclo %s\n", cyc)
-	}
-	if cog := n.Metadata["cognitive"]; cog != "" && cog != "0" {
-		fmt.Fprintf(&b, "  cogn %s\n", cog)
-	}
-	if n.Metadata["external"] == "true" {
-		fmt.Fprintf(&b, "  ro 1\n")
-	}
-	// Include body text for content-bearing nodes (functions, types, variables, comments).
-	// Statement nodes (for, if, switch, etc.) use metadata instead.
-	switch n.Kind {
-	case graph.KindFunction, graph.KindType, graph.KindVariable, graph.KindComment:
-		if n.Text != "" {
-			escaped := strings.ReplaceAll(n.Text, "\n", "\\n")
-			fmt.Fprintf(&b, "  text %s\n", escaped)
-		}
-	}
-
-	return toolText(strings.TrimRight(b.String(), "\n"))
+	return toolJSON(out)
 }
 
 // deadKindCode maps a graph.NodeKind string to a CCGF type code for dead code output.
@@ -1125,26 +1055,7 @@ func registerCCGFTools(srv *mcp.Server, g *graph.Graph, root string) {
 		if len(dead) == 0 {
 			return toolText("no dead code found"), nil, nil
 		}
-		var b strings.Builder
-		for _, d := range dead {
-			var kindCode string
-			if n, ok := g.GetNode(d.ID); ok {
-				kindCode = ccgf.NodeTypeCode(n)
-			}
-			if kindCode == "" {
-				kindCode = deadKindCode(d.Kind)
-			}
-			if d.File != "" {
-				loc := abbrevPath(d.File, root)
-				if d.Line > 0 {
-					loc = fmt.Sprintf("%s:%d", loc, d.Line)
-				}
-				fmt.Fprintf(&b, "dead %s %s %s\n", kindCode, d.Name, loc)
-			} else {
-				fmt.Fprintf(&b, "dead %s %s\n", kindCode, d.Name)
-			}
-		}
-		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
+		return toolJSON(dead), nil, nil
 	})
 }
 
@@ -1192,16 +1103,15 @@ func registerCELTools(srv *mcp.Server, g *graph.Graph, root string) {
 			nodes = nodes[len(nodes)-input.BottomN:]
 		}
 
-		var b strings.Builder
-		for i, n := range nodes {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			r := toolNode(n, root, g)
-			b.WriteString(r.Content[0].(*mcp.TextContent).Text)
-			b.WriteByte('\n')
+		type nodeWithIdx struct {
+			*graph.Node
+			Idx int `json:"idx,omitempty"`
 		}
-		return toolText(strings.TrimRight(b.String(), "\n")), nil, nil
+		enriched := make([]nodeWithIdx, len(nodes))
+		for i, n := range nodes {
+			enriched[i] = nodeWithIdx{Node: n, Idx: g.NodeIdx(n.ID)}
+		}
+		return toolJSON(enriched), nil, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
