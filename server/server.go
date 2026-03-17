@@ -109,7 +109,7 @@ func registerParseTools(srv *mcp.Server, g *graph.Graph, root string) {
 		Name: "parse_packages",
 		Description: "Type-check the Go module and load all packages into the graph. " +
 			"Slower than parse_tree (~seconds) but adds qualified_id metadata to every node, " +
-			"enabling precise cross-package rename via rename_symbol. " +
+			"enabling precise qualified_id metadata on every node. " +
 			"Requires all module dependencies to be present (go mod download). " +
 			"Resets the graph before loading.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input pathInput) (*mcp.CallToolResult, any, error) {
@@ -327,7 +327,7 @@ func registerSpecTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 func registerCodegenTools(srv *mcp.Server, g *graph.Graph, st *store.Store) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "render",
-		Description: "Preview a file node as Go source. Read-only — use add_node/update_node to modify files.",
+		Description: "Preview a file node as Go source (read-only).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input nodeIDInput) (*mcp.CallToolResult, any, error) {
 		src, err := codegen.RenderFile(g, st, input.ID)
 		if err != nil {
@@ -712,7 +712,7 @@ func registerHotspotTools(srv *mcp.Server, g *graph.Graph, root string) {
 		Description: "Run escape analysis then return the top heap-allocating non-external functions " +
 			"with their full source text in one call. " +
 			"Replaces the run_escape → query_nodes → get_nodes sequence. " +
-			"Each result is a CCGF node block including body text ready for update_nodes.",
+			"Each result includes the full function body text.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input findHotspotsInput) (*mcp.CallToolResult, any, error) {
 		dir := input.Dir
 		if dir == "" {
