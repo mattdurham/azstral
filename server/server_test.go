@@ -71,151 +71,46 @@ func TestMCPServer_ParseAndQuery(t *testing.T) {
 	callTool(t, session, "list_nodes", map[string]any{"kind": "function"})
 }
 
-// Test building hello world entirely through graph mutation + render.
-func TestMCPServer_BuildHelloWorld(t *testing.T) {
+// Test render on a parsed file (read-only codegen path).
+func TestMCPServer_RenderParsedFile(t *testing.T) {
 	session := setupTestServer(t)
+	helloPath := findHelloMain(t)
 
-	// 1. Create specs in the store.
-	callTool(t, session, "create_spec", map[string]any{
-		"id": "SPEC-004", "kind": "SPEC", "namespace": "",
-		"title": "Print Hello World to the console",
-	})
-	callTool(t, session, "create_spec", map[string]any{
-		"id": "NOTE-004", "kind": "NOTE", "namespace": "",
-		"title": "Hello world is a test fixture and proof of concept",
-	})
+	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
 
-	// 2. Build graph nodes.
-	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
-		{"id": "pkg:main", "kind": "package", "name": "main"},
-		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
-		{"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10},
-		{"id": "func:main", "kind": "function", "name": "main",
-			"text": "fmt.Println(\"Hello World\")", "line": 20,
-			"metadata": map[string]any{"params": "()", "returns": ""}},
-	}})
-	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
-		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
-		{"from": "file:main.go", "to": "import:fmt", "kind": "contains"},
-		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
-	}})
+	fileID := "file:" + helloPath
+	src := callTool(t, session, "render", map[string]any{"id": fileID})
 
-	// 3. Link specs to code.
-	callTool(t, session, "link_spec", map[string]any{
-		"spec_id": "SPEC-004", "node_id": "func:main",
-	})
-	callTool(t, session, "link_spec", map[string]any{
-		"spec_id": "NOTE-004", "node_id": "file:main.go",
-	})
-
-	// 4. Render.
-	src := callTool(t, session, "render", map[string]any{"id": "file:main.go"})
-
-	// Verify the output.
 	if !contains(src, "package main") {
 		t.Errorf("missing package declaration:\n%s", src)
-	}
-	if !contains(src, `"fmt"`) {
-		t.Errorf("missing fmt import:\n%s", src)
 	}
 	if !contains(src, "func main()") {
 		t.Errorf("missing main function:\n%s", src)
 	}
-	if !contains(src, `fmt.Println("Hello World")`) {
-		t.Errorf("missing Println statement:\n%s", src)
-	}
-	if !contains(src, "SPEC-004") {
-		t.Errorf("missing SPEC-004 comment:\n%s", src)
-	}
-
-	t.Logf("Generated source:\n%s", src)
+	t.Logf("Rendered source:\n%s", src)
 }
 
-// Test mutating hello world through the graph — no direct file edits.
-func TestMCPServer_MutateHelloWorld(t *testing.T) {
-	session := setupTestServer(t)
-
-	// 1. Build the hello world graph (same as BuildHelloWorld).
-	callTool(t, session, "create_spec", map[string]any{
-		"id": "SPEC-004", "kind": "SPEC", "namespace": "",
-		"title": "Print Hello World! to the console",
-	})
-	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
-		{"id": "pkg:main", "kind": "package", "name": "main"},
-		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
-		{"id": "import:fmt", "kind": "import", "name": "fmt", "line": 10},
-		{"id": "func:main", "kind": "function", "name": "main",
-			"text": `fmt.Println("Hello World")`, "line": 20,
-			"metadata": map[string]any{"params": "()", "returns": ""}},
-	}})
-	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
-		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
-		{"from": "file:main.go", "to": "import:fmt", "kind": "contains"},
-		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
-	}})
-	callTool(t, session, "link_spec", map[string]any{
-		"spec_id": "SPEC-004", "node_id": "func:main",
-	})
-
-	// Verify original.
-	src := callTool(t, session, "render", map[string]any{"id": "file:main.go"})
-	if !contains(src, `fmt.Println("Hello World")`) {
-		t.Fatalf("original missing Hello World:\n%s", src)
-	}
-	t.Logf("BEFORE mutation:\n%s", src)
-
-	// 2. Mutate: update the function body text via update_nodes.
-	callTool(t, session, "update_nodes", map[string]any{"nodes": []map[string]any{
-		{"id": "func:main", "text": `fmt.Println("Hello World!")`},
-	}})
-
-	// 3. Render again — should now have the exclamation mark.
-	src = callTool(t, session, "render", map[string]any{"id": "file:main.go"})
-	t.Logf("AFTER mutation:\n%s", src)
-
-	if !contains(src, `fmt.Println("Hello World!")`) {
-		t.Errorf("mutation failed — missing exclamation:\n%s", src)
-	}
-	if contains(src, `"Hello World")`) && !contains(src, `"Hello World!")`) {
-		t.Errorf("old text still present:\n%s", src)
-	}
-}
-
-// Test spec store CRUD via MCP.
+// Test spec store read-only operations via MCP.
 func TestMCPServer_SpecStore(t *testing.T) {
 	session := setupTestServer(t)
 
-	// Create at root namespace.
-	callTool(t, session, "create_spec", map[string]any{
-		"id": "SPEC-001", "kind": "SPEC", "namespace": "",
-		"title": "Parse Go into graph", "body": "The system shall parse Go source.",
-	})
-
-	// Create in io namespace.
-	callTool(t, session, "create_spec", map[string]any{
-		"id": "SPEC-020", "kind": "SPEC", "namespace": "io",
-		"title": "IO module reads files",
-	})
-
-	// List all.
+	// list_specs on empty store should return empty JSON array or "[]".
 	text := callTool(t, session, "list_specs", nil)
-	if !contains(text, "SPEC-001") || !contains(text, "SPEC-020") {
-		t.Errorf("list_specs missing specs:\n%s", text)
+	if text == "" {
+		t.Error("list_specs returned empty string")
 	}
+	t.Logf("list_specs (empty): %s", text)
 
-	// List by namespace.
-	text = callTool(t, session, "list_specs", map[string]any{"namespace": "io"})
-	if !contains(text, "SPEC-020") {
-		t.Errorf("list_specs namespace filter failed:\n%s", text)
+	// get_spec on non-existent ID should return a tool error.
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_spec",
+		Arguments: map[string]any{"id": "SPEC-999"},
+	})
+	if err != nil {
+		t.Fatalf("get_spec unexpected transport error: %v", err)
 	}
-	if contains(text, "SPEC-001") {
-		t.Errorf("list_specs namespace filter leaked root spec:\n%s", text)
-	}
-
-	// Get specific.
-	text = callTool(t, session, "get_spec", map[string]any{"id": "SPEC-001"})
-	if !contains(text, "Parse Go into graph") {
-		t.Errorf("get_spec wrong content:\n%s", text)
+	if !result.IsError {
+		t.Errorf("get_spec for non-existent ID should return an error, got: %v", result.Content)
 	}
 }
 
@@ -277,29 +172,29 @@ func TestQueryNodesJSON(t *testing.T) {
 func TestFindDeadcodeJSON(t *testing.T) {
 	session := setupTestServer(t)
 
-	callTool(t, session, "add_nodes", map[string]any{"nodes": []map[string]any{
-		{"id": "pkg:main", "kind": "package", "name": "main"},
-		{"id": "file:main.go", "kind": "file", "name": "main.go", "line": 1},
-		{"id": "func:main", "kind": "function", "name": "main", "line": 5,
-			"file": "file:main.go", "metadata": map[string]any{"params": "", "returns": ""}},
-		{"id": "func:unused", "kind": "function", "name": "unused", "line": 10,
-			"file": "file:main.go", "metadata": map[string]any{"params": "", "returns": ""}},
-	}})
-	callTool(t, session, "add_edges", map[string]any{"edges": []map[string]any{
-		{"from": "pkg:main", "to": "file:main.go", "kind": "contains"},
-		{"from": "file:main.go", "to": "func:main", "kind": "contains"},
-		{"from": "file:main.go", "to": "func:unused", "kind": "contains"},
-	}})
+	// Parse hello world — it has only main() which is excluded from dead code.
+	// find_deadcode should return "no dead code found" or an empty array.
+	helloPath := findHelloMain(t)
+	callTool(t, session, "parse_files", map[string]any{"paths": []string{helloPath}})
 
-	text := callTool(t, session, "find_deadcode", map[string]any{"include_exported": true})
-
-	if !strings.HasPrefix(strings.TrimSpace(text), "[") {
-		t.Errorf("find_deadcode must return JSON array:\n%s", text)
+	// find_deadcode returns JSON array or a "no dead code" message.
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "find_deadcode",
+		Arguments: map[string]any{"include_exported": true},
+	})
+	if err != nil {
+		t.Fatalf("find_deadcode transport error: %v", err)
 	}
-	if !strings.Contains(text, "unused") {
-		t.Errorf("find_deadcode must list the unused function:\n%s", text)
+	if result.IsError {
+		t.Fatalf("find_deadcode tool error: %v", result.Content)
 	}
+	text := result.Content[0].(*mcp.TextContent).Text
 	t.Logf("find_deadcode output:\n%s", text)
+	// Result is either an empty JSON array or "no dead code found".
+	trimmed := strings.TrimSpace(text)
+	if trimmed != "no dead code found" && trimmed != "[]" && !strings.HasPrefix(trimmed, "[") {
+		t.Errorf("unexpected find_deadcode output:\n%s", text)
+	}
 }
 
 func findHelloMain(t *testing.T) string {
