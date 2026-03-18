@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,6 +84,7 @@ func New(dbPath, root string) (*mcp.Server, error) {
 	registerVetTools(srv, g, root)
 	registerFindTodos(srv, g)
 	registerSnapshotTools(srv, g)
+	registerDocsTools(srv, root)
 	return srv, nil
 }
 
@@ -1185,3 +1188,106 @@ const toolsReference = `# Azstral Tool Reference
   pprof_flat_pct, pprof_cum_pct              from run_profile
   metadata.num("key")                        any numeric metadata field
 `
+
+// --- Docs tools ---
+
+// docFileNames are the spec-driven doc files azstral recognises.
+var docFileNames = []string{"SPECS.md", "NOTES.md", "TESTS.md", "BENCHMARKS.md"}
+
+func registerDocsTools(srv *mcp.Server, root string) {
+	type readDocsInput struct {
+		Pattern string `json:"pattern,omitempty" jsonschema:"optional substring or regex to filter entries; matches against section headings and body text"`
+		Kind    string `json:"kind,omitempty"    jsonschema:"filter by file type: SPECS, NOTES, TESTS, BENCHMARKS (case-insensitive). Omit for all."`
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "read_docs",
+		Description: "Read spec-driven documentation files (SPECS.md, NOTES.md, TESTS.md, BENCHMARKS.md) " +
+			"from the project tree. Returns content from all matching files, grouped by file path. " +
+			"Use pattern to search for a specific ID (e.g. 'SPEC-001') or keyword. " +
+			"Use kind to restrict to one doc type (SPECS, NOTES, TESTS, BENCHMARKS).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input readDocsInput) (*mcp.CallToolResult, any, error) {
+		if root == "" {
+			return toolError("no working root configured — call parse_tree first"), nil, nil
+		}
+
+		// Build the set of filenames to look for (case-insensitive match).
+		targets := docFileNames
+		if input.Kind != "" {
+			upper := strings.ToUpper(strings.TrimSuffix(strings.ToUpper(input.Kind), ".MD")) + ".md"
+			targets = []string{upper}
+		}
+		targetSet := make(map[string]bool, len(targets))
+		for _, t := range targets {
+			targetSet[strings.ToLower(t)] = true
+		}
+
+		type docResult struct {
+			File    string `json:"file"`
+			Content string `json:"content"`
+		}
+		var results []docResult
+
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				switch d.Name() {
+				case "vendor", ".git", "node_modules", "testdata":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !targetSet[strings.ToLower(d.Name())] {
+				return nil
+			}
+			data, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil
+			}
+			content := string(data)
+
+			// Filter by pattern if provided.
+			if input.Pattern != "" {
+				content = filterDocSections(content, input.Pattern)
+				if content == "" {
+					return nil
+				}
+			}
+
+			rel, _ := filepath.Rel(root, path)
+			results = append(results, docResult{File: rel, Content: content})
+			return nil
+		})
+		if err != nil {
+			return toolError(fmt.Sprintf("walk error: %v", err)), nil, nil
+		}
+		if len(results) == 0 {
+			return toolText("no matching doc files found"), nil, nil
+		}
+		return toolJSON(results), nil, nil
+	})
+}
+
+// filterDocSections returns only the sections (## headings and their body)
+// from a markdown doc that contain the pattern string.
+func filterDocSections(content, pattern string) string {
+	lower := strings.ToLower(pattern)
+	var out strings.Builder
+	sections := strings.Split(content, "\n## ")
+	for i, section := range sections {
+		// Restore the "## " prefix for all but the first segment.
+		candidate := section
+		if i > 0 {
+			candidate = "## " + section
+		}
+		if strings.Contains(strings.ToLower(candidate), lower) {
+			if out.Len() > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(strings.TrimRight(candidate, "\n"))
+		}
+	}
+	return out.String()
+}
